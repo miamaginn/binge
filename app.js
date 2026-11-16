@@ -636,7 +636,7 @@ document.addEventListener("click", async (e) => {
   try {
     switch (a) {
       case "auth-tab": S.authTab = el.dataset.tab; render(); break;
-      case "back": if (history.length > 1) { e.preventDefault(); history.back(); } break;
+      case "back": if (inAppNavs > 0) { e.preventDefault(); history.back(); } break; // otherwise the link's own href is used
       case "draft-status": d.status = el.dataset.status; render(); break;
       case "draft-ww": {
         const u = el.dataset.user;
@@ -801,7 +801,10 @@ document.addEventListener("submit", async (e) => {
   }
 });
 
-window.addEventListener("hashchange", render);
+// Count moves inside the app, so "‹ Back" only uses browser history when the
+// previous page is part of the app (not when a show link was opened directly).
+let inAppNavs = 0;
+window.addEventListener("hashchange", () => { inAppNavs++; render(); });
 window.addEventListener("beforeinstallprompt", (e) => { e.preventDefault(); S.installPrompt = e; });
 document.addEventListener("visibilitychange", () => { if (!document.hidden && S.me) refreshSocial().catch(() => {}); });
 
