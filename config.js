@@ -7,8 +7,8 @@
 // While these are empty the app runs in DEMO MODE: your data is saved only on
 // this device, and three pretend friends are added so you can see how
 // friend rankings look.
-export const SUPABASE_URL = "";
-export const SUPABASE_KEY = "";
+export const SUPABASE_URL = "https://lvnrlogawkjpnlswtwss.supabase.co";
+export const SUPABASE_KEY = "sb_publishable_XNOxRgeh7tQgw5Mjsp2uiA_K8Owq4ev";
 
 export const APP_NAME = "Binge";
 
