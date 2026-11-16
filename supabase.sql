@@ -49,6 +49,21 @@ create table if not exists public.tv_logs (
 );
 create index if not exists tv_logs_show_idx on public.tv_logs (show_id);
 
+-- Show recommendations from one friend to another
+create table if not exists public.tv_recs (
+  id         uuid primary key default gen_random_uuid(),
+  from_user  uuid not null references public.tv_profiles (id) on delete cascade,
+  to_user    uuid not null references public.tv_profiles (id) on delete cascade,
+  show_id    text not null,
+  message    text not null default '',
+  seen       boolean not null default false,
+  dismissed  boolean not null default false,
+  created_at timestamptz not null default now(),
+  unique (from_user, to_user, show_id),
+  check (from_user <> to_user)
+);
+create index if not exists tv_recs_to_idx on public.tv_recs (to_user);
+
 -- ───── Helpers ─────
 create or replace function public.tv_are_friends(a uuid, b uuid)
 returns boolean language sql stable security definer set search_path = public as $$
@@ -132,6 +147,20 @@ create policy "logs: me, friends, tagged" on public.tv_logs for select to authen
 create policy "logs: own insert" on public.tv_logs for insert to authenticated with check (user_id = auth.uid());
 create policy "logs: own update" on public.tv_logs for update to authenticated using (user_id = auth.uid()) with check (user_id = auth.uid());
 create policy "logs: own delete" on public.tv_logs for delete to authenticated using (user_id = auth.uid());
+
+-- Recommendations: only the sender and the recipient can see one, and you can only send to friends.
+alter table public.tv_recs enable row level security;
+drop policy if exists "recs: sender or recipient can read" on public.tv_recs;
+drop policy if exists "recs: send to a friend"             on public.tv_recs;
+drop policy if exists "recs: sender or recipient can edit" on public.tv_recs;
+drop policy if exists "recs: sender or recipient can delete" on public.tv_recs;
+create policy "recs: sender or recipient can read" on public.tv_recs for select to authenticated using (auth.uid() in (from_user, to_user));
+create policy "recs: send to a friend" on public.tv_recs for insert to authenticated
+  with check (from_user = auth.uid() and public.tv_are_friends(from_user, to_user));
+create policy "recs: sender or recipient can edit" on public.tv_recs for update to authenticated
+  using (auth.uid() in (from_user, to_user)) with check (auth.uid() in (from_user, to_user));
+create policy "recs: sender or recipient can delete" on public.tv_recs for delete to authenticated using (auth.uid() in (from_user, to_user));
+grant select, insert, update, delete on public.tv_recs to authenticated;
 
 grant select on public.tv_shows to anon;
 grant select, insert, update, delete on public.tv_profiles, public.tv_friendships, public.tv_shows, public.tv_logs to authenticated;

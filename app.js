@@ -17,6 +17,10 @@ const S = {
   search: { q: "", ids: null, loading: false, error: "" },
   userSearch: { q: "", results: [] },
   drafts: new Map(), // showId → unsaved log edits
+  recs: [], // recommendations I've sent or received
+  recsOk: true, // false until the tv_recs table exists in the database
+  recPanel: null, // { showId, to: [userIds], msg } while writing a recommendation
+  recNew: new Set(), // recommendation ids that were unread when the list was opened
   starterLoading: true,
   rankTab: "ranked",
   filters: loadPref("filters", { genre: "", platform: "", length: "", format: "", decade: "", status: "", friends: false, sort: "overall" }),
@@ -135,11 +139,44 @@ async function refreshSocial() {
   S.myLogs = new Map(mine.map((l) => [l.showId, l]));
   S.logs = logs;
   for (const p of [S.me, ...friends, ...requests.incoming.map((r) => r.profile), ...requests.outgoing.map((r) => r.profile)]) if (p) S.people.set(p.id, p);
-  ensurePeople(logs.flatMap((l) => [l.userId, ...(l.watchedWith || [])]));
-  ensureShows(logs.map((l) => l.showId));
+  await loadRecs();
+  ensurePeople([...logs.flatMap((l) => [l.userId, ...(l.watchedWith || [])]), ...S.recs.flatMap((r) => [r.from, r.to])]);
+  ensureShows([...logs.map((l) => l.showId), ...S.recs.map((r) => r.showId)]);
   updateBadge();
   render();
   refreshStats();
+}
+
+async function loadRecs() {
+  try {
+    S.recs = await S.store.recs();
+    S.recsOk = true;
+  } catch (e) {
+    // The recommendations table hasn't been added to the database yet: hide the feature.
+    console.warn(e);
+    S.recs = [];
+    S.recsOk = false;
+  }
+}
+
+const DEFAULT_REC_MSG = "I think you would love this show!";
+const recsToMe = () => S.recs.filter((r) => r.to === S.me.id && !r.dismissed);
+const unseenRecs = () => recsToMe().filter((r) => !r.seen);
+// received recommendations grouped by show, newest first
+function recGroups() {
+  const by = new Map();
+  for (const r of recsToMe()) (by.get(r.showId) || by.set(r.showId, []).get(r.showId)).push(r);
+  return [...by].map(([showId, recs]) => ({ showId, recs: recs.sort((a, b) => b.createdAt - a.createdAt) }))
+    .sort((a, b) => b.recs[0].createdAt - a.recs[0].createdAt);
+}
+
+async function markRecsSeen() {
+  const ids = unseenRecs().map((r) => r.id);
+  if (!ids.length) return;
+  ids.forEach((id) => S.recNew.add(id));
+  for (const r of S.recs) if (ids.includes(r.id)) r.seen = true;
+  updateBadge();
+  await S.store.updateRecs(ids, { seen: true }).catch((e) => console.warn(e));
 }
 
 async function loadCatalog() {
@@ -219,7 +256,19 @@ function viewFeed() {
       <a class="btn ghost" href="#/discover">Log a show</a>
     </section>`;
   }
+  const fresh = unseenRecs().filter((r) => S.shows.has(r.showId)).slice(0, 3);
   return `
+  ${fresh.length ? `<section class="block">
+    <h2 class="h2">💌 New recommendations</h2>
+    ${fresh.map((r) => { const sh = S.shows.get(r.showId); const p = S.people.get(r.from); return `
+      <a class="card tag-card" href="#/show/${encodeURIComponent(sh.id)}">
+        ${poster(sh, "xs")}
+        <div class="grow"><b>${esc(personName(r.from))}</b> recommended <b>${esc(sh.name)}</b>
+          ${r.message ? `<div class="feed-note">“${esc(r.message)}”</div>` : ""}</div>
+        ${avatar(p, "xs")}
+      </a>`; }).join("")}
+    <button class="btn small ghost see-all" data-action="open-recs">See all recommendations ›</button>
+  </section>` : ""}
   ${tagged.length ? `<section class="block">
     <h2 class="h2">Watched with you</h2>
     ${tagged.map((l) => { const s = S.shows.get(l.showId); return s ? `
@@ -373,6 +422,8 @@ function viewShow(id) {
       </div>
     </header>
 
+    ${recBanner(id)}
+
     <div class="score-tiles">
       <div class="tile"><span class="tile-label">You</span><span class="tile-num">${fmt(myScore)}</span>${stars(myScore, { size: "sm" })}</div>
       <div class="tile"><span class="tile-label">Friends${n.friendRated ? ` (${n.friendRated})` : ""}</span><span class="tile-num">${fmt(n.friendAvg)}</span>${stars(n.friendAvg, { size: "sm" })}</div>
@@ -380,6 +431,8 @@ function viewShow(id) {
     </div>
 
     ${s.summary ? `<p class="summary">${esc(s.summary)}</p>` : ""}
+
+    ${recommendBox(id)}
 
     <section class="card block log" id="logEditor">
       <h2 class="h2">${mine ? "Your log" : "Log this show"}</h2>
@@ -430,6 +483,51 @@ function viewShow(id) {
   </article>`;
 }
 
+function recBanner(showId) {
+  const recs = S.recs.filter((r) => r.to === S.me.id && r.showId === showId);
+  if (!recs.length) return "";
+  return `<div class="rec-banner">
+    ${recs.map((r) => `<div class="rec-line">${avatar(S.people.get(r.from), "xs")}
+      <div class="grow"><b>${esc(personName(r.from))}</b> recommended this to you <span class="muted small">· ${ago(r.createdAt)}</span>
+      ${r.message ? `<div class="feed-note">“${esc(r.message)}”</div>` : ""}</div></div>`).join("")}
+  </div>`;
+}
+
+function recommendBox(showId) {
+  if (!S.recsOk) return "";
+  const sentTo = S.recs.filter((r) => r.from === S.me.id && r.showId === showId).map((r) => r.to);
+  const sentLine = sentTo.length ? `<p class="muted small rec-sent">💌 You recommended this to ${esc(sentTo.map(personName).join(", "))}</p>` : "";
+  const panel = S.recPanel?.showId === showId ? S.recPanel : null;
+  if (!panel) {
+    return `<div class="rec-box">
+      <button class="btn rec-btn" data-action="rec-open">💌 Recommend to a friend</button>
+      ${sentLine}
+    </div>`;
+  }
+  if (!S.friends.length) {
+    return `<section class="card block rec-panel">
+      <p class="muted">Add friends first, then you can send them shows.</p>
+      <div class="actions"><a class="btn primary" href="#/friends">Find friends</a><button class="btn ghost" data-action="rec-cancel">Cancel</button></div>
+    </section>`;
+  }
+  const seen = new Set(S.logs.filter((l) => l.showId === showId && l.status !== "want").map((l) => l.userId));
+  return `<section class="card block rec-panel">
+    <h2 class="h2">💌 Recommend to a friend</h2>
+    <span class="rate-label">Send to</span>
+    <div class="chips">${S.friends.map((f) => {
+      const sent = sentTo.includes(f.id);
+      const note = sent ? " · sent ✓" : seen.has(f.id) ? " · has seen it" : "";
+      return `<button type="button" class="chip ${panel.to.includes(f.id) ? "on" : ""}" data-action="rec-to" data-user="${esc(f.id)}" aria-pressed="${panel.to.includes(f.id)}">${esc(f.emoji)} ${esc(f.name || f.username)}<span class="muted">${note}</span></button>`;
+    }).join("")}</div>
+    <label class="note-field"><span class="rate-label">Message</span>
+      <textarea id="recMsg" rows="2" maxlength="300">${esc(panel.msg)}</textarea></label>
+    <div class="actions">
+      <button class="btn primary" data-action="rec-send" ${panel.to.length ? "" : "disabled"}>Send${panel.to.length > 1 ? ` to ${panel.to.length} friends` : ""}</button>
+      <button class="btn ghost" data-action="rec-cancel">Cancel</button>
+    </div>
+  </section>`;
+}
+
 // little bar chart: friends' average per season vs yours
 function seasonChart(s, friendLogs, mine) {
   const rows = s.seasons.map((se) => ({ n: se.n, f: avg(friendLogs.map((l) => l.seasons?.[se.n]).filter((v) => v > 0)), m: mine?.seasons?.[se.n] || null }));
@@ -450,17 +548,20 @@ function seasonChart(s, friendLogs, mine) {
   </section>`;
 }
 
-function rankedList(logs, { linkUser } = {}) {
+function rankedList(logs, { linkUser, recs } = {}) {
   const tabs = { ranked: (l) => l.score != null, watching: (l) => l.status === "watching", want: (l) => l.status === "want", dropped: (l) => l.status === "dropped" };
-  const list = logs.filter(tabs[S.rankTab] || tabs.ranked).sort((a, b) => S.rankTab === "ranked" ? (b.score ?? 0) - (a.score ?? 0) || b.updatedAt - a.updatedAt : b.updatedAt - a.updatedAt);
+  const tab = tabs[S.rankTab] || (recs && S.rankTab === "recs") ? S.rankTab : "ranked";
+  const list = tab === "recs" ? [] : logs.filter(tabs[tab]).sort((a, b) => tab === "ranked" ? (b.score ?? 0) - (a.score ?? 0) || b.updatedAt - a.updatedAt : b.updatedAt - a.updatedAt);
   const count = (k) => logs.filter(tabs[k]).length;
+  const tabList = [["ranked", "Ranked", count("ranked")], ["watching", "Watching", count("watching")], ["want", "Want to watch", count("want")], ["dropped", "Dropped", count("dropped")]];
+  if (recs) tabList.push(["recs", "💌 From friends", recGroups().length]);
   return `
   <div class="seg wrap">
-    ${[["ranked", "Ranked"], ["watching", "Watching"], ["want", "Want to watch"], ["dropped", "Dropped"]].map(([k, t]) => `<button class="${S.rankTab === k ? "on" : ""}" data-action="rank-tab" data-tab="${k}">${t} <small>${count(k)}</small></button>`).join("")}
+    ${tabList.map(([k, t, c]) => `<button class="${tab === k ? "on" : ""}" data-action="rank-tab" data-tab="${k}">${t} <small>${c}</small></button>`).join("")}
   </div>
-  ${list.length ? `<ol class="rank-list">${list.map((l, i) => { const s = S.shows.get(l.showId); if (!s) return ""; return `
+  ${tab === "recs" ? viewRecs() : list.length ? `<ol class="rank-list">${list.map((l, i) => { const s = S.shows.get(l.showId); if (!s) return ""; return `
     <li><a class="card rank-item" href="#/show/${encodeURIComponent(s.id)}">
-      ${S.rankTab === "ranked" ? `<span class="rank-num">${i + 1}</span>` : ""}
+      ${tab === "ranked" ? `<span class="rank-num">${i + 1}</span>` : ""}
       ${poster(s, "sm")}
       <div class="grow">
         <div class="rank-name">${esc(s.name)}</div>
@@ -473,7 +574,50 @@ function rankedList(logs, { linkUser } = {}) {
 }
 
 function viewRank() {
-  return `<h1 class="h1">My shows</h1>${rankedList([...S.myLogs.values()])}`;
+  if (S.rankTab === "recs" && S.recsOk && unseenRecs().length) setTimeout(markRecsSeen, 0);
+  return `<h1 class="h1">My shows</h1>${rankedList([...S.myLogs.values()], { recs: S.recsOk })}`;
+}
+
+// Shows friends recommended to me, plus the ones I've sent
+function viewRecs() {
+  const groups = recGroups().filter((g) => S.shows.has(g.showId));
+  const sent = S.recs.filter((r) => r.from === S.me.id && S.shows.has(r.showId)).slice(0, 30);
+  const statusOf = (userId, showId) => {
+    const l = userId === S.me.id ? S.myLogs.get(showId) : S.logs.find((x) => x.userId === userId && x.showId === showId);
+    if (!l) return "";
+    return l.score != null ? `★ ${fmt(l.score)}` : STATUS_LABEL[l.status];
+  };
+  return `
+  ${groups.length ? `<div class="rank-list">${groups.map(({ showId, recs }) => {
+    const sh = S.shows.get(showId);
+    const mine = statusOf(S.me.id, showId);
+    return `<div class="card rec-card">
+      <a class="rec-show" href="#/show/${encodeURIComponent(showId)}">
+        ${poster(sh, "sm")}
+        <div class="grow">
+          <div class="rank-name">${esc(sh.name)}${recs.some((r) => S.recNew.has(r.id)) ? ` <span class="new-pill">New</span>` : ""}</div>
+          <div class="muted small">${esc(showMeta(sh))}</div>
+          ${mine ? `<div class="small">You: <b>${esc(mine)}</b></div>` : ""}
+        </div>
+      </a>
+      ${recs.map((r) => `<div class="rec-line">${avatar(S.people.get(r.from), "xs")}
+        <div class="grow"><b>${esc(personName(r.from))}</b> <span class="muted small">· ${ago(r.createdAt)}</span>
+        ${r.message ? `<div class="feed-note">“${esc(r.message)}”</div>` : ""}</div></div>`).join("")}
+      <div class="actions">
+        ${!S.myLogs.has(showId) ? `<button class="btn small primary" data-action="rec-want" data-show="${esc(showId)}">＋ Want to watch</button>` : ""}
+        <a class="btn small" href="#/show/${encodeURIComponent(showId)}">${S.myLogs.has(showId) ? "Open" : "Rate it"}</a>
+        <button class="btn small ghost" data-action="rec-dismiss" data-show="${esc(showId)}">Dismiss</button>
+      </div>
+    </div>`; }).join("")}</div>` : `<div class="empty small"><div class="empty-art">💌</div><p>No recommendations yet. When friends send you a show, it shows up here.</p></div>`}
+  ${sent.length ? `<section class="block">
+    <h2 class="h2">You recommended</h2>
+    ${sent.map((r) => { const sh = S.shows.get(r.showId); const st = statusOf(r.to, r.showId); return `
+      <a class="card person" href="#/show/${encodeURIComponent(sh.id)}">
+        ${poster(sh, "xs")}
+        <div class="grow"><b>${esc(sh.name)}</b> <span class="muted">to</span> ${esc(personName(r.to))}
+          <div class="muted small">${st ? `${esc(personName(r.to))}: <b>${esc(st)}</b>` : "Not logged yet"} · ${ago(r.createdAt)}</div></div>
+      </a>`; }).join("")}
+  </section>` : ""}`;
 }
 
 function viewFriends() {
@@ -605,10 +749,11 @@ function render() {
 }
 
 function updateBadge() {
-  const n = S.requests.incoming.length;
-  const b = document.getElementById("friendBadge");
-  b.textContent = n;
-  b.hidden = !n;
+  for (const [id, n] of [["friendBadge", S.requests.incoming.length], ["recBadge", S.me ? unseenRecs().length : 0]]) {
+    const b = document.getElementById(id);
+    b.textContent = n;
+    b.hidden = !n;
+  }
 }
 
 // ───────────────────────── interactions ─────────────────────────
@@ -667,6 +812,45 @@ document.addEventListener("click", async (e) => {
       case "clear-filters": Object.assign(S.filters, { genre: "", platform: "", length: "", format: "", decade: "", status: "", friends: false }); savePref("filters", S.filters); render(); break;
       case "clear-search": S.search = { q: "", ids: null, loading: false, error: "" }; render(); break;
       case "rank-tab": S.rankTab = el.dataset.tab; render(); break;
+      case "open-recs": S.rankTab = "recs"; location.hash = "#/rank"; break;
+      case "rec-open": S.recPanel = { showId: id, to: [], msg: DEFAULT_REC_MSG }; render(); break;
+      case "rec-cancel": S.recPanel = null; render(); break;
+      case "rec-to": {
+        const u = el.dataset.user, p = S.recPanel;
+        p.to = p.to.includes(u) ? p.to.filter((x) => x !== u) : [...p.to, u];
+        render(); break;
+      }
+      case "rec-send": {
+        const p = S.recPanel;
+        if (!p?.to.length) return;
+        el.disabled = true;
+        const msg = (document.getElementById("recMsg")?.value ?? p.msg).trim();
+        await S.store.saveShow(S.shows.get(id)); // so your friend can open it
+        await S.store.recommend(id, p.to, msg);
+        const names = p.to.map(personName);
+        S.recPanel = null;
+        await loadRecs();
+        render();
+        toast(`Sent to ${names.join(", ")} 💌`);
+        break;
+      }
+      case "rec-want": {
+        const showId = el.dataset.show;
+        el.disabled = true;
+        await S.store.saveShow(S.shows.get(showId));
+        await S.store.saveLog({ showId, status: "want", rating: null, seasons: {}, watchedWith: [], note: "" });
+        await refreshSocial();
+        toast(`Added ${S.shows.get(showId).name} to Want to watch`);
+        break;
+      }
+      case "rec-dismiss": {
+        const ids = recsToMe().filter((r) => r.showId === el.dataset.show).map((r) => r.id);
+        for (const r of S.recs) if (ids.includes(r.id)) r.dismissed = true;
+        render();
+        await S.store.updateRecs(ids, { dismissed: true });
+        toast("Dismissed");
+        break;
+      }
       case "add-friend":
         e.preventDefault();
         await S.store.addFriend(el.dataset.user);
@@ -756,6 +940,7 @@ document.addEventListener("input", (e) => {
       render();
     }, 300);
   }
+  if (e.target.id === "recMsg" && S.recPanel) S.recPanel.msg = e.target.value;
   if (e.target.id === "draftNote") { const d = S.drafts.get(route().arg); if (d) d.note = e.target.value; }
 });
 

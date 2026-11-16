@@ -125,6 +125,21 @@ async function supabaseStore() {
       }));
     },
     async deleteLog(showId) { ok(await sb.from("tv_logs").delete().eq("user_id", me.id).eq("show_id", showId)); },
+
+    // Recommendations I've sent or received:
+    //   { id, from, to, showId, message, seen, dismissed, createdAt }
+    async recs() {
+      const rows = ok(await sb.from("tv_recs").select("id,from_user,to_user,show_id,message,seen,dismissed,created_at")
+        .or(`from_user.eq.${me.id},to_user.eq.${me.id}`).order("created_at", { ascending: false }).limit(500));
+      return rows.map((r) => ({ id: r.id, from: r.from_user, to: r.to_user, showId: r.show_id, message: r.message, seen: r.seen, dismissed: r.dismissed, createdAt: Date.parse(r.created_at) }));
+    },
+    async recommend(showId, toIds, message) {
+      const now = new Date().toISOString();
+      ok(await sb.from("tv_recs").upsert(
+        toIds.map((to) => ({ from_user: me.id, to_user: to, show_id: showId, message, seen: false, dismissed: false, created_at: now })),
+        { onConflict: "from_user,to_user,show_id" }));
+    },
+    async updateRecs(ids, patch) { if (ids.length) ok(await sb.from("tv_recs").update(patch).in("id", ids)); },
     async stats(showIds) {
       if (!showIds.length) return {};
       const rows = ok(await sb.rpc("tv_show_stats", { ids: showIds }));
@@ -148,6 +163,7 @@ function demoStore() {
   ];
   const load = () => { try { return JSON.parse(localStorage.getItem(KEY)); } catch { return null; } };
   let db = load() || { me: null, profiles: {}, friendships: [], logs: [], shows: {}, seeded: {} };
+  db.recs ||= [];
   for (const f of FAKES) db.profiles[f.id] ||= { id: f.id, username: f.username, name: f.name, emoji: f.emoji };
   const save = () => { try { localStorage.setItem(KEY, JSON.stringify(db)); } catch {} };
   save();
@@ -187,7 +203,7 @@ function demoStore() {
     async signOut() {
       // Demo: signing out wipes this device's demo data so you can start over.
       localStorage.removeItem(KEY);
-      db = { me: null, profiles: {}, friendships: [], logs: [], shows: {}, seeded: {} };
+      db = { me: null, profiles: {}, friendships: [], logs: [], shows: {}, seeded: {}, recs: [] };
       for (const f of FAKES) db.profiles[f.id] = { id: f.id, username: f.username, name: f.name, emoji: f.emoji };
       save();
     },
@@ -236,6 +252,15 @@ function demoStore() {
       save();
     },
     async deleteLog(showId) { db.logs = db.logs.filter((l) => !(l.userId === db.me && l.showId === showId)); save(); },
+    async recs() { return db.recs.filter((r) => r.from === db.me || r.to === db.me).sort((a, b) => b.createdAt - a.createdAt).map(clone); },
+    async recommend(showId, toIds, message) {
+      for (const to of toIds) {
+        db.recs = db.recs.filter((r) => !(r.from === db.me && r.to === to && r.showId === showId));
+        db.recs.push({ id: uid(), from: db.me, to, showId, message, seen: false, dismissed: false, createdAt: Date.now() });
+      }
+      save();
+    },
+    async updateRecs(ids, patch) { for (const r of db.recs) if (ids.includes(r.id)) Object.assign(r, patch); save(); },
     async stats(showIds) {
       const out = {};
       for (const id of showIds) {
@@ -271,6 +296,16 @@ function demoStore() {
             score: scoreOf({ seasons }), updatedAt: Date.now() - Math.floor(hash(show.id + f.id + "t") * 21 * 864e5),
           });
         }
+      }
+      // a couple of pretend recommendations for you
+      if (!db.recsSeeded && db.me && shows.length >= 8) {
+        db.recsSeeded = changed = true;
+        const pick = (i) => shows[i % shows.length].id;
+        db.recs.push(
+          { id: uid(), from: "demo-alex", to: db.me, showId: pick(1), message: "I think you would love this show!", seen: false, dismissed: false, createdAt: Date.now() - 3 * 3600e3 },
+          { id: uid(), from: "demo-sam", to: db.me, showId: pick(6), message: "Trust me, stick with it past episode 2.", seen: false, dismissed: false, createdAt: Date.now() - 2 * 864e5 },
+          { id: uid(), from: "demo-jordan", to: db.me, showId: pick(1), message: "I think you would love this show!", seen: false, dismissed: false, createdAt: Date.now() - 5 * 864e5 },
+        );
       }
       if (changed) save();
       return changed;

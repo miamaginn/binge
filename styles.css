@@ -275,3 +275,20 @@ textarea { resize: vertical; }
 .profile-head { display: flex; gap: 16px; align-items: center; margin: 6px 0 16px; }
 .profile-head .h1 { margin: 0; }
 .invite { margin: 4px 0 0; }
+
+/* ── recommendations ── */
+.rec-box { margin: 0 0 4px; }
+.rec-btn { width: 100%; }
+.rec-sent { margin: 8px 0 0; text-align: center; }
+.rec-panel .chips { margin: 6px 0 14px; }
+.rec-panel .chip .muted { font-weight: 500; }
+.rec-banner { background: color-mix(in srgb, var(--accent) 12%, var(--card)); border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--line)); border-radius: var(--radius); padding: 4px 14px; margin: 14px 0 0; }
+.rec-line { display: flex; gap: 10px; align-items: flex-start; padding: 8px 0; }
+.rec-line + .rec-line { border-top: 1px solid color-mix(in srgb, var(--line) 60%, transparent); }
+.rec-line .avatar.xs { margin-top: 1px; }
+.rec-card { display: flex; flex-direction: column; gap: 4px; }
+.rec-show { display: flex; gap: 12px; text-decoration: none; padding-bottom: 6px; }
+.rec-card .actions { margin-top: 6px; flex-wrap: wrap; }
+.rec-card .actions .primary { flex: none; }
+.new-pill { font-size: 11px; font-weight: 700; background: var(--accent); color: #1a0c06; border-radius: 6px; padding: 1px 6px; vertical-align: 2px; }
+.see-all { margin-top: 8px; }
