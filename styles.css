@@ -354,3 +354,9 @@ body.is-dragging, body.is-dragging * { user-select: none; -webkit-user-select: n
 .fix-row { display: grid; grid-template-columns: 1fr 1.4fr; gap: 10px; }
 .fix-reset { align-self: flex-start; font-size: 13px; }
 .fix-form .actions { margin-top: 2px; }
+
+/* ── sharing ── */
+.share-row { display: flex; gap: 8px; }
+.share-row .rec-btn { flex: 1; width: auto; }
+.share-row .share-btn:only-child { flex: 1; }
+.shared-show { display: flex; gap: 12px; align-items: center; margin: 0 0 14px; border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); }

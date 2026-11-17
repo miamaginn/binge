@@ -69,7 +69,8 @@ export function fromTvmaze(t, override = {}) {
     platform: override.platform || normalizePlatform(t.webChannel?.name || t.network?.name),
     runtime: t.averageRuntime || t.runtime || 0,
     seasons: seasons.length ? seasons : [{ n: 1, episodes: null }],
-    format: (status === "finished" && seasons.length <= 1) || /mini/i.test(t.type || "") ? "limited" : "series",
+    // (without season info, only call it limited if TVmaze says so)
+    format: /mini/i.test(t.type || "") || (t._embedded && status === "finished" && seasons.length <= 1) ? "limited" : "series",
     status,
     image: t.image?.medium || "",
     imageLg: t.image?.original || t.image?.medium || "",
@@ -78,19 +79,38 @@ export function fromTvmaze(t, override = {}) {
   };
 }
 
-// ── tiny rate-limited fetch queue (TVmaze allows ~20 calls / 10 s) ──
-let chain = Promise.resolve();
-function tvFetch(path) {
-  const p = chain.then(async () => {
-    const res = await fetch(API + path);
-    if (res.status === 429) { await new Promise((r) => setTimeout(r, 2000)); return fetch(API + path); }
-    return res;
-  });
-  chain = p.then(() => new Promise((r) => setTimeout(r, 450)), () => {});
-  return p.then(async (res) => {
-    if (res.status === 404) return null;
-    if (!res.ok) throw new Error(`TVmaze ${res.status}`);
-    return res.json();
+// ── TVmaze requests (it allows ~20 calls / 10 s) ──
+// Two lanes:
+//   "now" — things you're waiting on (searching, opening a show): sent right away.
+//   "bg"  — background lookups (starter shows, filling in search results), sent one
+//           at a time with a gap, leaving room for "now" requests. "bgFirst" jumps
+//           to the front of the background line.
+const bgQueue = [];
+let bgRunning = false;
+async function runBg() {
+  if (bgRunning) return;
+  bgRunning = true;
+  while (bgQueue.length) {
+    const job = bgQueue.shift();
+    if (job.isWanted && !job.isWanted()) { job.resolve(undefined); continue; } // nobody needs it any more
+    job.run().then(job.resolve, job.reject);
+    await new Promise((r) => setTimeout(r, 650));
+  }
+  bgRunning = false;
+}
+async function rawFetch(path) {
+  let res = await fetch(API + path);
+  if (res.status === 429) { await new Promise((r) => setTimeout(r, 2500)); res = await fetch(API + path); }
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`TVmaze ${res.status}`);
+  return res.json();
+}
+function tvFetch(path, { lane = "now", isWanted } = {}) {
+  if (lane === "now") return rawFetch(path);
+  return new Promise((resolve, reject) => {
+    const job = { run: () => rawFetch(path), resolve, reject, isWanted };
+    if (lane === "bgFirst") bgQueue.unshift(job); else bgQueue.push(job);
+    runBg();
   });
 }
 
@@ -102,18 +122,22 @@ function writeCache(c) {
 }
 const fresh = (e) => e && Date.now() - e.at < CACHE_DAYS * 864e5;
 
+// Search returns right away. Results don't include seasons yet, so ones we haven't
+// looked up before are marked `partial`; fill them in with getShow(id, { lane: "bgFirst" }).
 export async function searchShows(q) {
   const res = await tvFetch(`/search/shows?q=${encodeURIComponent(q)}`);
-  // search results don't include seasons; fetch details for the top few
-  const top = (res || []).slice(0, 8).map((r) => r.show);
-  return Promise.all(top.map((t) => getShow(`tvm:${t.id}`).catch(() => fromTvmaze(t))));
+  const cache = readCache();
+  return (res || []).slice(0, 12).map(({ show: t }) => {
+    const id = `tvm:${t.id}`;
+    return fresh(cache[id]) ? cache[id].show : { ...fromTvmaze(t, cache[id]?.override), partial: true };
+  });
 }
 
-export async function getShow(id) {
+export async function getShow(id, { lane = "now", isWanted } = {}) {
   const cache = readCache();
   if (fresh(cache[id])) return cache[id].show;
   if (!id.startsWith("tvm:")) return cache[id]?.show || fallbackById(id);
-  const t = await tvFetch(`/shows/${id.slice(4)}?embed=seasons`);
+  const t = await tvFetch(`/shows/${id.slice(4)}?embed=seasons`, { lane, isWanted });
   if (!t) return null;
   const show = fromTvmaze(t, cache[id]?.override);
   cache[id] = { at: Date.now(), show, override: cache[id]?.override };
@@ -131,7 +155,7 @@ export async function loadStarters(onShow) {
     let show = fresh(cache[key]) ? cache[key].show : null;
     if (!show && !offline) {
       try {
-        const t = await tvFetch(`/singlesearch/shows?q=${encodeURIComponent(s.q)}&embed=seasons`);
+        const t = await tvFetch(`/singlesearch/shows?q=${encodeURIComponent(s.q)}&embed=seasons`, { lane: "bg" });
         if (t) {
           show = fromTvmaze(t, s);
           cache[key] = cache[show.id] = { at: Date.now(), show, override: s.platform ? { platform: s.platform } : undefined };

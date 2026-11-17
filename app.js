@@ -259,6 +259,7 @@ async function afterSignIn() {
 // ───────────────────────── views ─────────────────────────
 function viewAuth() {
   const demo = mode === "demo";
+  const pendingShow = S.pendingHash?.startsWith("#/show/") ? S.shows.get(decodeURIComponent(S.pendingHash.slice(7))) : null;
   const tab = S.authTab || "up";
   const emojis = ["📺", "🍿", "🎬", "🛋️", "🦄", "🐸", "🌮", "👾", "🌙", "🔥", "🐱", "🎧"];
   return `
@@ -268,6 +269,7 @@ function viewAuth() {
       <h1>${esc(APP_NAME)}</h1>
       <p>Log every show you watch, rank it season by season, and see what your friends really thought.</p>
     </div>
+    ${pendingShow ? `<div class="card shared-show">${poster(pendingShow, "sm")}<div class="grow"><b>Someone shared ${esc(pendingShow.name)} with you</b><div class="muted small">${esc(showMeta(pendingShow))} · ${demo ? "make a profile" : "sign up or sign in"} to see ratings and log it.</div></div></div>` : ""}
     ${demo ? `<div class="note">🧪 <b>Demo mode.</b> Your profile and ratings are saved on this device only, and a few pretend friends are added so you can try everything. Connect Supabase to use real accounts (see README).</div>` : `
     <div class="seg" role="tablist">
       <button class="${tab === "up" ? "on" : ""}" data-action="auth-tab" data-tab="up">Create account</button>
@@ -417,12 +419,14 @@ function viewDiscover() {
     <button class="filter chip ${f.friends ? "on" : ""}" data-action="toggle-friends-filter" aria-pressed="${f.friends}">👯 Friends watched</button>
     ${active ? `<button class="filter chip clear" data-action="clear-filters">✕ Clear ${active}</button>` : ""}
   </div>
+  <div id="liveResults">
   ${S.search.loading ? `<p class="muted center">Searching…</p>` : ""}
   ${S.search.error ? `<p class="form-error center">${esc(S.search.error)}</p>` : ""}
-  ${searching && !S.search.loading ? `<p class="muted small">${list.length} result${list.length === 1 ? "" : "s"} for “${esc(S.search.q)}”</p>` : ""}
+  ${searching && !S.search.loading ? `<p class="muted small">${list.length} result${list.length === 1 ? "" : "s"} for “${esc(S.search.term)}”${base.length > list.length ? ` · <b>${base.length - list.length} more hidden by your filters</b> <button class="linkish" data-action="clear-filters">Show all</button>` : ""}</p>` : ""}
   <div class="grid">${list.map(showCard).join("")}</div>
   ${!list.length && !S.search.loading ? `<div class="empty small"><p>No shows match. ${active ? "Try clearing some filters," : ""} or search for a show by name.</p></div>` : ""}
-  ${!searching && S.starterLoading ? `<p class="muted center small">Loading shows…</p>` : ""}`;
+  ${!searching && S.starterLoading ? `<p class="muted center small">Loading shows…</p>` : ""}
+  </div>`;
 }
 
 function showCard(s) {
@@ -607,13 +611,14 @@ function recBanner(showId) {
 }
 
 function recommendBox(showId) {
-  if (!S.recsOk) return "";
+  const shareBtn = `<button class="btn share-btn" data-action="share-show" aria-label="Share this show">📤 Share</button>`;
+  if (!S.recsOk) return `<div class="rec-box share-row">${shareBtn}</div>`;
   const sentTo = S.recs.filter((r) => r.from === S.me.id && r.showId === showId).map((r) => r.to);
   const sentLine = sentTo.length ? `<p class="muted small rec-sent">💌 You recommended this to ${esc(sentTo.map(personName).join(", "))}</p>` : "";
   const panel = S.recPanel?.showId === showId ? S.recPanel : null;
   if (!panel) {
     return `<div class="rec-box">
-      <button class="btn rec-btn" data-action="rec-open">💌 Recommend to a friend</button>
+      <div class="share-row"><button class="btn rec-btn" data-action="rec-open">💌 Recommend to a friend</button>${shareBtn}</div>
       ${sentLine}
     </div>`;
   }
@@ -974,11 +979,11 @@ function viewFriends() {
   <form class="searchbar" id="userSearchForm" role="search">
     <input id="userSearchInput" type="search" placeholder="Find people by name or username" value="${esc(S.userSearch.q)}" autocapitalize="none" autocomplete="off" />
   </form>
-  ${S.userSearch.q ? `<section class="block">${S.userSearch.results.length ? S.userSearch.results.map((p) => `
+  <div id="liveResults">${S.userSearch.q ? `<section class="block">${S.userSearch.results.length ? S.userSearch.results.map((p) => `
     <div class="card person">
       ${avatar(p)}<div class="grow"><b>${esc(p.name)}</b><div class="muted small">@${esc(p.username)}</div></div>
       ${fids.has(p.id) ? `<span class="muted small">Friends ✓</span>` : outIds.has(p.id) ? `<span class="muted small">Requested</span>` : `<button class="btn small primary" data-action="add-friend" data-user="${esc(p.id)}">${inIds.has(p.id) ? "Accept" : "Add"}</button>`}
-    </div>`).join("") : `<p class="muted">No one found.</p>`}</section>` : ""}
+    </div>`).join("") : `<p class="muted">No one found.</p>`}</section>` : ""}</div>
   <div class="card invite">
     <div class="grow"><b>Invite friends</b><div class="muted small">Send them the link. Your username is <b>@${esc(S.me.username)}</b>.</div></div>
     <button class="btn small" data-action="share">Share</button>
@@ -1087,7 +1092,16 @@ function render() {
   const active = document.activeElement;
   const keepId = active && ["INPUT", "TEXTAREA"].includes(active.tagName) && active.id ? active.id : null;
   const caret = keepId ? [active.selectionStart, active.selectionEnd] : null;
-  $main.innerHTML = (views[r.name] || viewFeed)();
+  const html = (views[r.name] || viewFeed)();
+  const live = document.getElementById("liveResults");
+  if (live && key === lastRoute && ["searchInput", "userSearchInput"].includes(keepId)) {
+    // don't rebuild the box you're typing in (keeps the phone keyboard + autocorrect happy)
+    const t = document.createElement("template");
+    t.innerHTML = html;
+    const fresh = t.content.getElementById("liveResults");
+    if (fresh) { live.innerHTML = fresh.innerHTML; return; }
+  }
+  $main.innerHTML = html;
   if (keepId) { const el = document.getElementById(keepId); if (el) { el.focus(); try { el.setSelectionRange(...caret); } catch {} } }
   if (key !== lastRoute) { window.scrollTo(0, 0); lastRoute = key; }
   document.querySelectorAll(".tabbar a").forEach((a) => a.classList.toggle("on", a.dataset.tab === r.name || (r.name === "show" && a.dataset.tab === "discover") || (r.name === "u" && a.dataset.tab === "friends")));
@@ -1143,7 +1157,7 @@ document.addEventListener("click", async (e) => {
         d.note = document.getElementById("draftNote")?.value.trim() || "";
         if (d.status === "want") { d.rating = null; d.seasons = {}; }
         const show = S.shows.get(id);
-        await S.store.saveShow(baseShow(id));
+        await S.store.saveShow(await fullShow(id));
         const before = S.myLogs.get(id);
         await S.store.saveLog(d);
         S.drafts.delete(id);
@@ -1162,7 +1176,7 @@ document.addEventListener("click", async (e) => {
         break;
       case "toggle-friends-filter": S.filters.friends = !S.filters.friends; savePref("filters", S.filters); render(); break;
       case "clear-filters": Object.assign(S.filters, { genre: "", platform: "", length: "", format: "", decade: "", status: "", friends: false }); savePref("filters", S.filters); render(); break;
-      case "clear-search": S.search = { q: "", ids: null, loading: false, error: "" }; render(); break;
+      case "clear-search": searchSeq++; S.search = { q: "", term: "", ids: null, loading: false, error: "" }; render(); break;
       case "rank-tab": S.rankTab = el.dataset.tab; render(); break;
       case "settle-ties": settleTies(); break;
       case "fo-pick": {
@@ -1175,6 +1189,24 @@ document.addEventListener("click", async (e) => {
       }
       case "fo-tough": { const F = S.faceoff; if (!F) return; F.lo = F.hi = F.mid; await stepFaceoff(); break; }
       case "fo-stop": S.faceoff = null; render(); break;
+      case "share-show": {
+        const sh = S.shows.get(id);
+        const mine = S.myLogs.get(id);
+        const url = `${location.origin}${location.pathname}#/show/${encodeURIComponent(id)}`;
+        const text = mine?.score != null ? `I gave ${sh.name} ★ ${fmt(mine.score)} on ${APP_NAME}. What did you think?` : `Check out ${sh.name} on ${APP_NAME}`;
+        // open the share sheet first: phones only allow it straight after a tap
+        let shared = false;
+        if (navigator.share) {
+          try { await navigator.share({ title: sh.name, text, url }); shared = true; }
+          catch (err) { if (err?.name === "AbortError") return; }
+        }
+        if (!shared) {
+          try { await navigator.clipboard.writeText(`${text} ${url}`); toast("Link copied. Paste it anywhere!"); }
+          catch { window.prompt("Copy this link:", url); }
+        }
+        fullShow(id).then((b) => S.store.saveShow(b)).catch(() => {}); // so the link opens fast for whoever gets it
+        break;
+      }
       case "edit-open": {
         const sh = S.shows.get(id);
         const plats = platformsOf(sh);
@@ -1204,7 +1236,7 @@ document.addEventListener("click", async (e) => {
         if (D.format !== sh.format) fields.format = D.format;
         if (!Object.keys(fields).length) { S.editDraft = null; render(); toast("Nothing changed"); return; }
         el.disabled = true;
-        await S.store.saveShow(baseShow(id));
+        await S.store.saveShow(await fullShow(id));
         await S.store.addShowEdit(id, fields, D.note.trim());
         S.editDraft = null;
         await loadEdits();
@@ -1250,7 +1282,7 @@ document.addEventListener("click", async (e) => {
         if (!p?.to.length) return;
         el.disabled = true;
         const msg = (document.getElementById("recMsg")?.value ?? p.msg).trim();
-        await S.store.saveShow(baseShow(id)); // so your friend can open it
+        await S.store.saveShow(await fullShow(id)); // so your friend can open it
         await S.store.recommend(id, p.to, msg);
         const names = p.to.map(personName);
         S.recPanel = null;
@@ -1262,7 +1294,7 @@ document.addEventListener("click", async (e) => {
       case "rec-want": {
         const showId = el.dataset.show;
         el.disabled = true;
-        await S.store.saveShow(baseShow(showId));
+        await S.store.saveShow(await fullShow(showId));
         await S.store.saveLog({ showId, status: "want", rating: null, seasons: {}, watchedWith: [], note: "" });
         await refreshSocial();
         toast(`Added ${S.shows.get(showId).name} to Want to watch`);
@@ -1332,21 +1364,39 @@ document.addEventListener("change", (e) => {
 });
 
 let searchTimer, searchSeq = 0;
-async function runSearch(q) {
+// S.search.q is always exactly what's in the box; S.search.term is what was searched.
+async function runSearch(term) {
   const my = ++searchSeq;
-  S.search = { ...S.search, q, loading: true, error: "" };
+  S.search = { ...S.search, term, loading: true, error: "" };
   render();
   try {
-    const res = await searchShows(q);
+    const res = await searchShows(term);
     if (my !== searchSeq) return;
-    addShows(res);
-    S.search = { q, ids: res.map((s) => s.id), loading: false, error: "" };
+    // don't let a quick result overwrite fuller info we already have
+    addShows(res.filter((x) => !(x.partial && S.shows.has(x.id) && !S.shows.get(x.id).partial)));
+    S.search = { ...S.search, term, ids: res.map((x) => x.id), loading: false, error: "" };
     refreshStats();
+    // fill in seasons etc. in the background, newest search first; stop if you search again
+    for (const x of res) {
+      if (!S.shows.get(x.id)?.partial) continue;
+      getShow(x.id, { lane: "bgFirst", isWanted: () => my === searchSeq })
+        .then((full) => { if (full) { addShows([full]); render(); } })
+        .catch(() => {});
+    }
   } catch (err) {
     if (my !== searchSeq) return;
-    S.search = { q, ids: [], loading: false, error: "Couldn't reach the show database. Check your connection." };
+    S.search = { ...S.search, term, ids: [], loading: false, error: "Couldn't reach the show database. Check your connection." };
   }
   render();
+}
+
+// Make sure a show has full details (seasons etc.) before saving or sharing it.
+async function fullShow(id) {
+  if (S.shows.get(id)?.partial) {
+    const f = await getShow(id).catch(() => null);
+    if (f) addShows([f]);
+  }
+  return baseShow(id);
 }
 
 let userTimer;
@@ -1355,7 +1405,7 @@ document.addEventListener("input", (e) => {
     const q = e.target.value.trim();
     S.search.q = e.target.value;
     clearTimeout(searchTimer);
-    if (!q) { S.search = { q: "", ids: null, loading: false, error: "" }; render(); return; }
+    if (!q) { searchSeq++; S.search = { q: e.target.value, term: "", ids: null, loading: false, error: "" }; render(); return; }
     searchTimer = setTimeout(() => runSearch(q), 450);
   }
   if (e.target.id === "userSearchInput") {
@@ -1404,7 +1454,8 @@ document.addEventListener("submit", async (e) => {
         S.me = await S.store.signIn({ email: data.email, password: data.password });
       }
       await afterSignIn();
-      location.hash = S.friends.length ? "#/feed" : "#/discover";
+      location.hash = S.pendingHash || (S.friends.length ? "#/feed" : "#/discover");
+      S.pendingHash = null;
       render();
     } catch (ex) {
       err.textContent = ex.message || "Something went wrong.";
@@ -1424,6 +1475,12 @@ document.addEventListener("visibilitychange", () => { if (!document.hidden && S.
 (async function boot() {
   if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
   document.getElementById("demoRibbon").hidden = mode !== "demo";
+  // opened from a shared link? remember where to go once signed in
+  if (/^#\/(show|u)\//.test(location.hash)) {
+    S.pendingHash = location.hash;
+    const m = location.hash.match(/^#\/show\/(.+)$/);
+    if (m) getShow(decodeURIComponent(m[1])).then((x) => { if (x) { addShows([x]); if (!S.me) render(); } }).catch(() => {});
+  }
   try {
     S.store = await createStore();
     S.me = await S.store.init();
@@ -1433,7 +1490,7 @@ document.addEventListener("visibilitychange", () => { if (!document.hidden && S.
       if (me && me.id !== was) await afterSignIn();
       render();
     });
-    if (S.me) await afterSignIn();
+    if (S.me) { await afterSignIn(); S.pendingHash = null; }
   } catch (err) {
     console.error(err);
     $main.innerHTML = `<div class="empty"><div class="empty-art">📡</div><h2>Can't connect</h2><p class="muted">${esc(err.message || err)}</p><p class="muted small">If you just set up Supabase, make sure you ran supabase.sql.</p><button class="btn primary" onclick="location.reload()">Try again</button></div>`;
