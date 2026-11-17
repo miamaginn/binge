@@ -9,7 +9,7 @@
 import { STARTER_SHOWS } from "./config.js";
 
 const API = "https://api.tvmaze.com";
-const CACHE_KEY = "binge.showcache.v1";
+const CACHE_KEY = "binge.showcache.v2"; // v2: only count seasons that have premiered
 const CACHE_DAYS = 3;
 
 // TVmaze lists the channel a show first aired on. Map those to where people
@@ -53,8 +53,10 @@ export function normalizePlatform(name) {
 
 // TVmaze show JSON (with embedded seasons) → our show shape
 export function fromTvmaze(t, override = {}) {
+  // Only count seasons that have premiered (TVmaze also lists announced ones)
+  const today = new Date().toISOString().slice(0, 10);
   const seasons = (t._embedded?.seasons || [])
-    .filter((s) => s.number > 0 && (s.premiereDate || s.episodeOrder))
+    .filter((s) => s.number > 0 && s.premiereDate && s.premiereDate <= today)
     .map((s) => ({ n: s.number, episodes: s.episodeOrder || null }));
   const status = t.status === "Ended" ? "finished" : t.status === "In Development" ? "upcoming" : "airing";
   const year = t.premiered ? +t.premiered.slice(0, 4) : 0;

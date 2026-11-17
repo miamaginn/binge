@@ -153,6 +153,14 @@ async function supabaseStore() {
         { onConflict: "from_user,to_user,show_id" }));
     },
     async updateRecs(ids, patch) { if (ids.length) ok(await sb.from("tv_recs").update(patch).in("id", ids)); },
+
+    // Show info corrections: { id, showId, userId, fields, note, createdAt }
+    async showEdits() {
+      return ok(await sb.from("tv_show_edits").select("*").order("created_at").limit(5000))
+        .map((r) => ({ id: r.id, showId: r.show_id, userId: r.user_id, fields: r.fields, note: r.note, createdAt: Date.parse(r.created_at) }));
+    },
+    async addShowEdit(showId, fields, note) { ok(await sb.from("tv_show_edits").insert({ show_id: showId, user_id: me.id, fields, note })); },
+    async undoShowEdit(id) { ok(await sb.from("tv_show_edits").delete().eq("id", id).eq("user_id", me.id)); },
     async stats(showIds) {
       if (!showIds.length) return {};
       const rows = ok(await sb.rpc("tv_show_stats", { ids: showIds }));
@@ -177,6 +185,7 @@ function demoStore() {
   const load = () => { try { return JSON.parse(localStorage.getItem(KEY)); } catch { return null; } };
   let db = load() || { me: null, profiles: {}, friendships: [], logs: [], shows: {}, seeded: {} };
   db.recs ||= [];
+  db.edits ||= [];
   for (const f of FAKES) db.profiles[f.id] ||= { id: f.id, username: f.username, name: f.name, emoji: f.emoji };
   const save = () => { try { localStorage.setItem(KEY, JSON.stringify(db)); } catch {} };
   save();
@@ -216,7 +225,7 @@ function demoStore() {
     async signOut() {
       // Demo: signing out wipes this device's demo data so you can start over.
       localStorage.removeItem(KEY);
-      db = { me: null, profiles: {}, friendships: [], logs: [], shows: {}, seeded: {}, recs: [] };
+      db = { me: null, profiles: {}, friendships: [], logs: [], shows: {}, seeded: {}, recs: [], edits: [] };
       for (const f of FAKES) db.profiles[f.id] = { id: f.id, username: f.username, name: f.name, emoji: f.emoji };
       save();
     },
@@ -279,6 +288,9 @@ function demoStore() {
       save();
     },
     async updateRecs(ids, patch) { for (const r of db.recs) if (ids.includes(r.id)) Object.assign(r, patch); save(); },
+    async showEdits() { return db.edits.map(clone); },
+    async addShowEdit(showId, fields, note) { db.edits.push({ id: uid(), showId, userId: db.me, fields, note, createdAt: Date.now() }); save(); },
+    async undoShowEdit(id) { db.edits = db.edits.filter((e) => !(e.id === id && e.userId === db.me)); save(); },
     async stats(showIds) {
       const out = {};
       for (const id of showIds) {

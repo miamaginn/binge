@@ -344,3 +344,13 @@ body.is-dragging, body.is-dragging * { user-select: none; -webkit-user-select: n
 .mv-change { display: flex; align-items: center; justify-content: center; gap: 12px; margin: 14px 0; font-size: 15px; }
 .mv-sheet .btn.big { margin-top: 8px; }
 @media (prefers-reduced-motion: reduce) { .rank-list li { transition: none; } }
+
+/* ── show info corrections ── */
+.linkish { border: 0; background: none; padding: 0; color: var(--accent2); font: inherit; font-weight: 600; cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
+.fix-line { margin: 10px 0 0; }
+.fix-form { display: flex; flex-direction: column; gap: 12px; }
+.fix-form label { display: flex; flex-direction: column; gap: 6px; font-weight: 600; font-size: 14px; }
+.fix-form .chips { margin-top: -4px; }
+.fix-row { display: grid; grid-template-columns: 1fr 1.4fr; gap: 10px; }
+.fix-reset { align-self: flex-start; font-size: 13px; }
+.fix-form .actions { margin-top: 2px; }

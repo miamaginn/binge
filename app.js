@@ -21,6 +21,11 @@ const S = {
   recsOk: true, // false until the tv_recs table exists in the database
   recPanel: null, // { showId, to: [userIds], msg } while writing a recommendation
   recNew: new Set(), // recommendation ids that were unread when the list was opened
+  baseShows: new Map(), // showId → show info as it came from TVmaze (before corrections)
+  edits: [], // corrections people submitted to show info
+  editsOk: true, // false until the tv_show_edits table exists
+  editDraft: null, // { showId, platforms, other, seasons, status, format, note } while correcting a show
+  refreshed: new Set(), // shows re-fetched from TVmaze this session
   faceoff: null, // running face-off between same-score shows (see "Face-offs" below)
   starterLoading: true,
   rankTab: "ranked",
@@ -81,10 +86,14 @@ function seasonChips(seasons) {
   return `<span class="season-chips">${entries.map(([n, v]) => `<span class="schip">S${n} <b>${fmt(v)}</b></span>`).join("")}</span>`;
 }
 
+// A show can be on several services (corrections can add more than TVmaze knows about)
+const platformsOf = (show) => (show?.platforms?.length ? show.platforms : [show?.platform].filter(Boolean));
+
 function showMeta(show) {
   const bits = [];
   if (show.year) bits.push(show.endYear && show.endYear !== show.year ? `${show.year}–${show.endYear}` : show.status === "airing" ? `${show.year}–` : `${show.year}`);
-  if (show.platform) bits.push(show.platform);
+  const plats = platformsOf(show);
+  if (plats.length) bits.push(plats.join(", "));
   return bits.join(" · ");
 }
 
@@ -104,7 +113,47 @@ function showNumbers(id) {
 
 // ───────────────────────── data loading ─────────────────────────
 function addShows(list) {
-  for (const s of list) if (s && s.id) S.shows.set(s.id, { ...S.shows.get(s.id), ...s });
+  for (const s of list) {
+    if (!s || !s.id) continue;
+    const base = { ...S.baseShows.get(s.id), ...s };
+    delete base.edited; // never let corrected info leak into the base copy
+    S.baseShows.set(s.id, base);
+    S.shows.set(s.id, withEdits(base));
+  }
+}
+const baseShow = (id) => S.baseShows.get(id) || S.shows.get(id);
+
+// Apply people's corrections on top of TVmaze's info. Newest value per field wins.
+function withEdits(base) {
+  const edits = S.edits.filter((e) => e.showId === base.id).sort((a, b) => a.createdAt - b.createdAt);
+  let fields = {}, active = [];
+  for (const e of edits) {
+    if (e.fields.reset) { fields = {}; active = []; continue; }
+    Object.assign(fields, e.fields);
+    active.push(e);
+  }
+  if (!active.length) return base;
+  const show = { ...base, edited: active };
+  if (fields.platforms?.length) { show.platforms = fields.platforms; show.platform = fields.platforms[0]; }
+  if (fields.seasonCount > 0) {
+    show.seasons = Array.from({ length: fields.seasonCount }, (_, i) => base.seasons?.[i] || { n: i + 1, episodes: null });
+  }
+  if (fields.status) show.status = fields.status;
+  if (fields.format) show.format = fields.format;
+  else if (fields.seasonCount || fields.status) show.format = show.status === "finished" && show.seasons.length <= 1 ? "limited" : "series";
+  return show;
+}
+
+async function loadEdits() {
+  try {
+    S.edits = await S.store.showEdits();
+    S.editsOk = true;
+  } catch (e) {
+    console.warn(e); // table not created yet: hide corrections
+    S.edits = [];
+    S.editsOk = false;
+  }
+  for (const base of S.baseShows.values()) S.shows.set(base.id, withEdits(base));
 }
 
 async function ensurePeople(ids) {
@@ -142,8 +191,8 @@ async function refreshSocial() {
   S.myLogs = new Map(mine.map((l) => [l.showId, l]));
   S.logs = logs;
   for (const p of [S.me, ...friends, ...requests.incoming.map((r) => r.profile), ...requests.outgoing.map((r) => r.profile)]) if (p) S.people.set(p.id, p);
-  await loadRecs();
-  ensurePeople([...logs.flatMap((l) => [l.userId, ...(l.watchedWith || [])]), ...S.recs.flatMap((r) => [r.from, r.to])]);
+  await Promise.all([loadRecs(), loadEdits()]);
+  ensurePeople([...logs.flatMap((l) => [l.userId, ...(l.watchedWith || [])]), ...S.recs.flatMap((r) => [r.from, r.to]), ...S.edits.map((e) => e.userId)]);
   ensureShows([...logs.map((l) => l.showId), ...S.recs.map((r) => r.showId)]);
   updateBadge();
   render();
@@ -324,7 +373,7 @@ function applyFilters(list) {
   const fids = friendIds();
   let out = list.filter((s) =>
     (!f.genre || s.genres?.includes(f.genre)) &&
-    (!f.platform || (f.platform === "other" ? !PLATFORMS.includes(s.platform) : s.platform === f.platform)) &&
+    (!f.platform || (f.platform === "other" ? platformsOf(s).some((x) => !PLATFORMS.includes(x)) : platformsOf(s).includes(f.platform))) &&
     (!len || len.test(s.runtime)) &&
     (!f.format || s.format === f.format) &&
     (!dec || dec.test(s.year)) &&
@@ -396,6 +445,15 @@ function showCard(s) {
 function viewShow(id) {
   const s = S.shows.get(id);
   if (!s) { ensureShows([id]); return `<p class="muted center">Loading…</p>`; }
+  if (id.startsWith("tvm:") && !S.refreshed.has(id)) {
+    S.refreshed.add(id);
+    getShow(id).then((fresh) => {
+      if (!fresh) return;
+      addShows([fresh]);
+      render();
+      S.store.saveShow(baseShow(id)).catch(() => {}); // keep the shared copy up to date
+    }).catch(() => {});
+  }
   const n = showNumbers(id);
   const mine = n.mine;
   const d = S.drafts.get(id) || (mine ? structuredClone(mine) : { showId: id, status: "finished", rating: null, seasons: {}, watchedWith: [], note: "" });
@@ -424,6 +482,8 @@ function viewShow(id) {
         </div>
       </div>
     </header>
+    ${correctionLine(s)}
+    ${correctionForm(s)}
 
     ${recBanner(id)}
 
@@ -484,6 +544,56 @@ function viewShow(id) {
     </section>
     ${seasonCount > 1 && n.friendLogs.length ? seasonChart(s, n.friendLogs, mine) : ""}
   </article>`;
+}
+
+// ───────────────────────── Show info corrections ─────────────────────────
+function correctionLine(s) {
+  if (!S.editsOk) return "";
+  const last = s.edited?.[s.edited.length - 1];
+  const mineToUndo = last && last.userId === S.me.id;
+  return `<p class="muted small fix-line">
+    ${last ? `✏️ Info corrected by ${esc(personName(last.userId))} · ${ago(last.createdAt)}${last.note ? ` · “${esc(last.note)}”` : ""}
+      ${mineToUndo ? `· <button class="linkish" data-action="edit-undo" data-id="${esc(last.id)}">Undo</button>` : ""} · ` : ""}
+    ${S.editDraft?.showId === s.id ? "" : `<button class="linkish" data-action="edit-open">✏️ ${last ? "Correct again" : "Wrong info? Suggest a correction"}</button>`}
+  </p>`;
+}
+
+function correctionForm(s) {
+  const D = S.editDraft;
+  if (!S.editsOk || D?.showId !== s.id) return "";
+  const choices = [...new Set([...PLATFORMS, ...D.platforms])];
+  return `<section class="card block fix-form">
+    <h2 class="h2">✏️ Correct ${esc(s.name)}</h2>
+    <p class="muted small">Fixes show up for everyone on ${esc(APP_NAME)}.</p>
+    <span class="rate-label">Where to watch <span class="muted">(pick all)</span></span>
+    <div class="chips">${choices.map((p) => `<button type="button" class="chip ${D.platforms.includes(p) ? "on" : ""}" aria-pressed="${D.platforms.includes(p)}" data-action="edit-plat" data-plat="${esc(p)}">${esc(p)}</button>`).join("")}</div>
+    <label>Somewhere else? <span class="hint">separate with commas</span><input id="editOther" value="${esc(D.other)}" placeholder="e.g. Tubi, Pluto TV" /></label>
+    <div class="fix-row">
+      <label>Seasons out so far<input id="editSeasons" type="number" inputmode="numeric" min="1" max="60" value="${esc(D.seasons)}" /></label>
+      <label>Status<select id="editStatus">
+        ${[["finished", "Finished"], ["airing", "New episodes coming"], ["upcoming", "Not out yet"]].map(([v, t]) => `<option value="${v}" ${D.status === v ? "selected" : ""}>${t}</option>`).join("")}
+      </select></label>
+    </div>
+    <label>Type<select id="editFormat">
+      ${[["series", "Series (can have more seasons)"], ["limited", "Limited / mini series"]].map(([v, t]) => `<option value="${v}" ${D.format === v ? "selected" : ""}>${t}</option>`).join("")}
+    </select></label>
+    <label>Note <span class="hint">optional</span><input id="editNote" maxlength="200" value="${esc(D.note)}" placeholder="What was wrong?" /></label>
+    ${s.edited?.length ? `<button class="linkish fix-reset" data-action="edit-reset">Reset to the original info from TVmaze</button>` : ""}
+    <div class="actions">
+      <button class="btn primary" data-action="edit-submit">Save correction</button>
+      <button class="btn ghost" data-action="edit-cancel">Cancel</button>
+    </div>
+  </section>`;
+}
+
+function readEditForm() {
+  const D = S.editDraft;
+  D.other = document.getElementById("editOther")?.value ?? D.other;
+  D.seasons = document.getElementById("editSeasons")?.value ?? D.seasons;
+  D.status = document.getElementById("editStatus")?.value ?? D.status;
+  D.format = document.getElementById("editFormat")?.value ?? D.format;
+  D.note = document.getElementById("editNote")?.value ?? D.note;
+  return D;
 }
 
 function recBanner(showId) {
@@ -1033,7 +1143,7 @@ document.addEventListener("click", async (e) => {
         d.note = document.getElementById("draftNote")?.value.trim() || "";
         if (d.status === "want") { d.rating = null; d.seasons = {}; }
         const show = S.shows.get(id);
-        await S.store.saveShow(show);
+        await S.store.saveShow(baseShow(id));
         const before = S.myLogs.get(id);
         await S.store.saveLog(d);
         S.drafts.delete(id);
@@ -1065,6 +1175,53 @@ document.addEventListener("click", async (e) => {
       }
       case "fo-tough": { const F = S.faceoff; if (!F) return; F.lo = F.hi = F.mid; await stepFaceoff(); break; }
       case "fo-stop": S.faceoff = null; render(); break;
+      case "edit-open": {
+        const sh = S.shows.get(id);
+        const plats = platformsOf(sh);
+        S.editDraft = { showId: id, platforms: plats.filter((p) => PLATFORMS.includes(p)), other: plats.filter((p) => !PLATFORMS.includes(p)).join(", "),
+          seasons: sh.seasons.length, status: sh.status, format: sh.format, note: "" };
+        render();
+        document.querySelector(".fix-form")?.scrollIntoView({ behavior: "smooth", block: "start" });
+        break;
+      }
+      case "edit-cancel": S.editDraft = null; render(); break;
+      case "edit-plat": {
+        const D = readEditForm(), pl = el.dataset.plat;
+        D.platforms = D.platforms.includes(pl) ? D.platforms.filter((x) => x !== pl) : [...D.platforms, pl];
+        render(); break;
+      }
+      case "edit-submit": {
+        const D = readEditForm(), sh = S.shows.get(id);
+        const platforms = [...new Set([...D.platforms, ...D.other.split(",").map((x) => x.trim()).filter(Boolean)])];
+        const seasonCount = Math.round(+D.seasons);
+        if (!platforms.length) { toast("Pick at least one place to watch"); return; }
+        if (!(seasonCount >= 1 && seasonCount <= 60)) { toast("Seasons should be a number from 1 to 60"); return; }
+        // only send what actually changed
+        const fields = {};
+        if (platforms.join("|") !== platformsOf(sh).join("|")) fields.platforms = platforms;
+        if (seasonCount !== sh.seasons.length) fields.seasonCount = seasonCount;
+        if (D.status !== sh.status) fields.status = D.status;
+        if (D.format !== sh.format) fields.format = D.format;
+        if (!Object.keys(fields).length) { S.editDraft = null; render(); toast("Nothing changed"); return; }
+        el.disabled = true;
+        await S.store.saveShow(baseShow(id));
+        await S.store.addShowEdit(id, fields, D.note.trim());
+        S.editDraft = null;
+        await loadEdits();
+        render();
+        toast("Thanks! Fixed for everyone ✏️");
+        break;
+      }
+      case "edit-reset":
+        if (!confirm("Go back to the original info from TVmaze for everyone?")) return;
+        await S.store.addShowEdit(id, { reset: true }, "Reset to TVmaze");
+        S.editDraft = null;
+        await loadEdits(); render(); toast("Reset to the original info");
+        break;
+      case "edit-undo":
+        await S.store.undoShowEdit(el.dataset.id);
+        await loadEdits(); render(); toast("Correction undone");
+        break;
       case "mv-no": S.moveConfirm = null; S.refocus = null; render(); break;
       case "mv-yes": {
         const M = S.moveConfirm;
@@ -1093,7 +1250,7 @@ document.addEventListener("click", async (e) => {
         if (!p?.to.length) return;
         el.disabled = true;
         const msg = (document.getElementById("recMsg")?.value ?? p.msg).trim();
-        await S.store.saveShow(S.shows.get(id)); // so your friend can open it
+        await S.store.saveShow(baseShow(id)); // so your friend can open it
         await S.store.recommend(id, p.to, msg);
         const names = p.to.map(personName);
         S.recPanel = null;
@@ -1105,7 +1262,7 @@ document.addEventListener("click", async (e) => {
       case "rec-want": {
         const showId = el.dataset.show;
         el.disabled = true;
-        await S.store.saveShow(S.shows.get(showId));
+        await S.store.saveShow(baseShow(showId));
         await S.store.saveLog({ showId, status: "want", rating: null, seasons: {}, watchedWith: [], note: "" });
         await refreshSocial();
         toast(`Added ${S.shows.get(showId).name} to Want to watch`);
@@ -1169,6 +1326,7 @@ document.addEventListener("keydown", (e) => {
 });
 
 document.addEventListener("change", (e) => {
+  if (S.editDraft && ["editStatus", "editFormat"].includes(e.target.id)) readEditForm();
   const f = e.target.dataset.filter;
   if (f) { S.filters[f] = e.target.value; savePref("filters", S.filters); render(); }
 });
@@ -1209,6 +1367,7 @@ document.addEventListener("input", (e) => {
     }, 300);
   }
   if (e.target.id === "recMsg" && S.recPanel) S.recPanel.msg = e.target.value;
+  if (S.editDraft && ["editOther", "editSeasons", "editNote"].includes(e.target.id)) readEditForm();
   if (e.target.id === "draftNote") { const d = S.drafts.get(route().arg); if (d) d.note = e.target.value; }
 });
 

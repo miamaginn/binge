@@ -66,6 +66,18 @@ create table if not exists public.tv_recs (
 );
 create index if not exists tv_recs_to_idx on public.tv_recs (to_user);
 
+-- Corrections to show info (where to watch, seasons, status), shared with everyone.
+-- The newest value for each field wins; {"reset": true} goes back to TVmaze's info.
+create table if not exists public.tv_show_edits (
+  id         uuid primary key default gen_random_uuid(),
+  show_id    text not null,
+  user_id    uuid not null references public.tv_profiles (id) on delete cascade,
+  fields     jsonb not null,
+  note       text not null default '',
+  created_at timestamptz not null default now()
+);
+create index if not exists tv_show_edits_show_idx on public.tv_show_edits (show_id);
+
 -- ───── Helpers ─────
 create or replace function public.tv_are_friends(a uuid, b uuid)
 returns boolean language sql stable security definer set search_path = public as $$
@@ -163,6 +175,15 @@ create policy "recs: sender or recipient can edit" on public.tv_recs for update 
   using (auth.uid() in (from_user, to_user)) with check (auth.uid() in (from_user, to_user));
 create policy "recs: sender or recipient can delete" on public.tv_recs for delete to authenticated using (auth.uid() in (from_user, to_user));
 grant select, insert, update, delete on public.tv_recs to authenticated;
+
+alter table public.tv_show_edits enable row level security;
+drop policy if exists "show edits: signed-in can read"  on public.tv_show_edits;
+drop policy if exists "show edits: add your own"        on public.tv_show_edits;
+drop policy if exists "show edits: undo your own"       on public.tv_show_edits;
+create policy "show edits: signed-in can read" on public.tv_show_edits for select to authenticated using (true);
+create policy "show edits: add your own"       on public.tv_show_edits for insert to authenticated with check (user_id = auth.uid());
+create policy "show edits: undo your own"      on public.tv_show_edits for delete to authenticated using (user_id = auth.uid());
+grant select, insert, delete on public.tv_show_edits to authenticated;
 
 grant select on public.tv_shows to anon;
 grant select, insert, update, delete on public.tv_profiles, public.tv_friendships, public.tv_shows, public.tv_logs to authenticated;
