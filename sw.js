@@ -2,7 +2,7 @@
 //  • App files: served from cache instantly, refreshed in the background.
 //  • Show posters: cached after the first view.
 //  • Everything else (Supabase, TVmaze searches): straight to the network.
-const VERSION = "binge-v7";
+const VERSION = "binge-v8";
 const SHELL = ["./", "index.html", "styles.css", "app.js", "store.js", "catalog.js", "config.js", "manifest.json", "icon.svg", "icon-192.png"];
 
 self.addEventListener("install", (e) => {
@@ -17,6 +17,7 @@ self.addEventListener("fetch", (e) => {
   if (req.method !== "GET") return;
   const url = new URL(req.url);
 
+  if (url.pathname.startsWith("/_vercel/")) return; // analytics: always straight to the network
   if (url.origin === location.origin) {
     // stale-while-revalidate
     e.respondWith(caches.open(VERSION).then(async (c) => {
