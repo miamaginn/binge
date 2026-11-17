@@ -48,6 +48,8 @@ create table if not exists public.tv_logs (
   primary key (user_id, show_id)
 );
 create index if not exists tv_logs_show_idx on public.tv_logs (show_id);
+-- Order among your own shows with the same score, from face-offs (higher = preferred)
+alter table public.tv_logs add column if not exists tiebreak integer;
 
 -- Show recommendations from one friend to another
 create table if not exists public.tv_recs (

@@ -21,6 +21,7 @@ const S = {
   recsOk: true, // false until the tv_recs table exists in the database
   recPanel: null, // { showId, to: [userIds], msg } while writing a recommendation
   recNew: new Set(), // recommendation ids that were unread when the list was opened
+  faceoff: null, // running face-off between same-score shows (see "Face-offs" below)
   starterLoading: true,
   rankTab: "ranked",
   filters: loadPref("filters", { genre: "", platform: "", length: "", format: "", decade: "", status: "", friends: false, sort: "overall" }),
@@ -34,6 +35,8 @@ function savePref(k, v) { try { localStorage.setItem("binge.pref." + k, JSON.str
 
 // ───────────────────────── helpers ─────────────────────────
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+// Ranking order: score, then face-off result (higher tiebreak = preferred), then most recent
+const rankSort = (a, b) => (b.score ?? 0) - (a.score ?? 0) || (b.tiebreak ?? 0) - (a.tiebreak ?? 0) || b.updatedAt - a.updatedAt;
 const avg = (xs) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null);
 const fmt = (n) => (n == null ? "–" : (Math.round(n * 10) / 10).toFixed(1));
 const friendIds = () => new Set(S.friends.map((f) => f.id));
@@ -551,7 +554,7 @@ function seasonChart(s, friendLogs, mine) {
 function rankedList(logs, { linkUser, recs } = {}) {
   const tabs = { ranked: (l) => l.score != null, watching: (l) => l.status === "watching", want: (l) => l.status === "want", dropped: (l) => l.status === "dropped" };
   const tab = tabs[S.rankTab] || (recs && S.rankTab === "recs") ? S.rankTab : "ranked";
-  const list = tab === "recs" ? [] : logs.filter(tabs[tab]).sort((a, b) => tab === "ranked" ? (b.score ?? 0) - (a.score ?? 0) || b.updatedAt - a.updatedAt : b.updatedAt - a.updatedAt);
+  const list = tab === "recs" ? [] : logs.filter(tabs[tab]).sort((a, b) => tab === "ranked" ? rankSort(a, b) : b.updatedAt - a.updatedAt);
   const count = (k) => logs.filter(tabs[k]).length;
   const tabList = [["ranked", "Ranked", count("ranked")], ["watching", "Watching", count("watching")], ["want", "Want to watch", count("want")], ["dropped", "Dropped", count("dropped")]];
   if (recs) tabList.push(["recs", "💌 From friends", recGroups().length]);
@@ -575,7 +578,115 @@ function rankedList(logs, { linkUser, recs } = {}) {
 
 function viewRank() {
   if (S.rankTab === "recs" && S.recsOk && unseenRecs().length) setTimeout(markRecsSeen, 0);
-  return `<h1 class="h1">My shows</h1>${rankedList([...S.myLogs.values()], { recs: S.recsOk })}`;
+  const open = faceoffOk() && ["ranked", undefined].includes(S.rankTab) ? unsettledGroups() : [];
+  const tied = open.reduce((n, g) => n + g.length, 0);
+  return `<h1 class="h1">My shows</h1>
+  ${open.length ? `<div class="card tie-banner">
+    <div class="grow"><b>⚔️ ${tied} shows are tied</b><div class="muted small">Pick favorites head-to-head so your ranking is exact.</div></div>
+    <button class="btn small primary" data-action="settle-ties">Settle ties</button>
+  </div>` : ""}
+  ${rankedList([...S.myLogs.values()], { recs: S.recsOk })}`;
+}
+
+// ───────────────────────── Face-offs ─────────────────────────
+// Shows with the same score are ordered by picking one over the other.
+// Each show is placed with a binary search, so it takes ~log2(n) picks.
+const faceoffOk = () => S.store?.tiebreakOk?.() !== false;
+const sameScore = (a, b) => a != null && b != null && Math.abs(a - b) < 0.001;
+const myRanked = () => [...S.myLogs.values()].filter((l) => l.score != null).sort(rankSort);
+function tieGroups() {
+  const out = [];
+  for (const l of myRanked()) {
+    const g = out[out.length - 1];
+    if (g && sameScore(g[0].score, l.score)) g.push(l); else out.push([l]);
+  }
+  return out.filter((g) => g.length > 1);
+}
+const isUnsettled = (g) => g.some((l) => l.tiebreak == null) || new Set(g.map((l) => l.tiebreak)).size < g.length;
+const unsettledGroups = () => tieGroups().filter(isUnsettled);
+
+// After saving a rating: place this show among your other shows with the same score.
+function maybeFaceoff(showId, before) {
+  if (!faceoffOk()) return;
+  const log = S.myLogs.get(showId);
+  if (!log || log.score == null) return;
+  const others = myRanked().filter((l) => l.showId !== showId && sameScore(l.score, log.score));
+  if (!others.length) return;
+  const unchanged = before && sameScore(before.score, log.score) && log.tiebreak != null && !isUnsettled([...others, log]);
+  if (unchanged) return;
+  startFaceoff([{ score: log.score, ordered: others.map((l) => l.showId), queue: [showId] }]);
+}
+
+function settleTies() {
+  // keep the order you've already picked; only place shows without a unique spot yet
+  const groups = unsettledGroups().map((g) => {
+    const count = (t) => g.filter((l) => l.tiebreak === t).length;
+    const placed = g.filter((l) => l.tiebreak != null && count(l.tiebreak) === 1);
+    return { score: g[0].score, ordered: placed.map((l) => l.showId), queue: g.filter((l) => !placed.includes(l)).map((l) => l.showId) };
+  });
+  if (groups.length) startFaceoff(groups);
+}
+
+function startFaceoff(groups) {
+  S.faceoff = { groups, gi: 0, cur: null, lo: 0, hi: 0, mid: 0, picks: 0 };
+  stepFaceoff();
+}
+
+async function stepFaceoff() {
+  const F = S.faceoff;
+  for (;;) {
+    const g = F.groups[F.gi];
+    if (!g) {
+      S.faceoff = null;
+      render();
+      toast(F.picks ? "Ranking updated 🏆" : "Saved");
+      return;
+    }
+    if (F.cur == null) {
+      if (!g.queue.length) { await commitGroup(g); F.gi++; continue; }
+      F.cur = g.queue.shift();
+      F.lo = 0;
+      F.hi = g.ordered.length;
+    }
+    if (F.lo >= F.hi) { g.ordered.splice(F.lo, 0, F.cur); F.cur = null; continue; }
+    F.mid = (F.lo + F.hi) >> 1;
+    render();
+    return;
+  }
+}
+
+async function commitGroup(g) {
+  const n = g.ordered.length;
+  const items = g.ordered.map((showId, i) => ({ showId, tiebreak: n - i }));
+  for (const it of items) { const l = S.myLogs.get(it.showId); if (l) l.tiebreak = it.tiebreak; }
+  try { await S.store.setTiebreaks(items); } catch (e) { console.error(e); toast("Couldn't save the face-off"); }
+}
+
+function viewFaceoff() {
+  const F = S.faceoff;
+  if (!F || F.cur == null) return "";
+  const g = F.groups[F.gi];
+  const a = S.shows.get(F.cur), b = S.shows.get(g.ordered[F.mid]);
+  if (!a || !b) return "";
+  const left = Math.ceil(Math.log2(F.hi - F.lo + 1));
+  const remainingShows = g.queue.length + F.groups.slice(F.gi + 1).reduce((n, x) => n + x.queue.length, 0);
+  const side = (s) => `<button class="fo-pick" data-action="fo-pick" data-show="${esc(s.id)}">
+      ${poster(s)}
+      <span class="fo-name">${esc(s.name)}</span>
+      <span class="muted small">${esc(showMeta(s))}</span>
+    </button>`;
+  return `<div class="fo-overlay" role="dialog" aria-modal="true" aria-labelledby="foTitle">
+    <div class="fo-sheet">
+      <div class="fo-top">
+        <span class="fo-tier">${stars(g.score, { size: "sm" })} ${fmt(g.score)} tier</span>
+        <button class="btn small ghost" data-action="fo-stop">Finish later</button>
+      </div>
+      <h2 class="fo-title" id="foTitle">Which do you like more?</h2>
+      <div class="fo-pair">${side(a)}<span class="fo-vs" aria-hidden="true">VS</span>${side(b)}</div>
+      <button class="btn ghost fo-tough" data-action="fo-tough">🤷 Too tough to call</button>
+      <p class="muted small center">${left > 1 ? `About ${left} more pick${left === 1 ? "" : "s"} for ${esc(a.name)}` : `Last pick for ${esc(a.name)}`}${remainingShows ? ` · ${remainingShows} more show${remainingShows === 1 ? "" : "s"} to place` : ""}</p>
+    </div>
+  </div>`;
 }
 
 // Shows friends recommended to me, plus the ones I've sent
@@ -746,6 +857,10 @@ function render() {
   if (key !== lastRoute) { window.scrollTo(0, 0); lastRoute = key; }
   document.querySelectorAll(".tabbar a").forEach((a) => a.classList.toggle("on", a.dataset.tab === r.name || (r.name === "show" && a.dataset.tab === "discover") || (r.name === "u" && a.dataset.tab === "friends")));
   document.getElementById("meBtn").innerHTML = avatar(S.me);
+  const fo = viewFaceoff();
+  const $ov = document.getElementById("overlay");
+  if ($ov.dataset.html !== fo) { $ov.innerHTML = fo; $ov.dataset.html = fo; }
+  document.body.classList.toggle("modal-open", !!fo);
 }
 
 function updateBadge() {
@@ -794,11 +909,13 @@ document.addEventListener("click", async (e) => {
         if (d.status === "want") { d.rating = null; d.seasons = {}; }
         const show = S.shows.get(id);
         await S.store.saveShow(show);
+        const before = S.myLogs.get(id);
         await S.store.saveLog(d);
         S.drafts.delete(id);
         S.catalogIds.add(id);
         await refreshSocial();
         toast(S.myLogs.get(id)?.score != null ? `Saved: ${show.name} ★ ${fmt(S.myLogs.get(id).score)}` : `Saved ${show.name}`);
+        maybeFaceoff(id, before);
         break;
       }
       case "delete-log":
@@ -812,6 +929,17 @@ document.addEventListener("click", async (e) => {
       case "clear-filters": Object.assign(S.filters, { genre: "", platform: "", length: "", format: "", decade: "", status: "", friends: false }); savePref("filters", S.filters); render(); break;
       case "clear-search": S.search = { q: "", ids: null, loading: false, error: "" }; render(); break;
       case "rank-tab": S.rankTab = el.dataset.tab; render(); break;
+      case "settle-ties": settleTies(); break;
+      case "fo-pick": {
+        const F = S.faceoff;
+        if (!F || F.cur == null) return;
+        F.picks++;
+        if (el.dataset.show === F.cur) F.hi = F.mid; else F.lo = F.mid + 1;
+        await stepFaceoff();
+        break;
+      }
+      case "fo-tough": { const F = S.faceoff; if (!F) return; F.lo = F.hi = F.mid; await stepFaceoff(); break; }
+      case "fo-stop": S.faceoff = null; render(); break;
       case "open-recs": S.rankTab = "recs"; location.hash = "#/rank"; break;
       case "rec-open": S.recPanel = { showId: id, to: [], msg: DEFAULT_REC_MSG }; render(); break;
       case "rec-cancel": S.recPanel = null; render(); break;

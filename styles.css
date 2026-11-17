@@ -292,3 +292,37 @@ textarea { resize: vertical; }
 .rec-card .actions .primary { flex: none; }
 .new-pill { font-size: 11px; font-weight: 700; background: var(--accent); color: #1a0c06; border-radius: 6px; padding: 1px 6px; vertical-align: 2px; }
 .see-all { margin-top: 8px; }
+
+/* ── face-offs ── */
+.tie-banner { display: flex; gap: 12px; align-items: center; margin: 0 0 14px; border-color: color-mix(in srgb, var(--accent2) 45%, var(--line)); }
+body.modal-open { overflow: hidden; }
+.fo-overlay {
+  position: fixed; inset: 0; z-index: 60; display: flex; align-items: flex-end; justify-content: center;
+  background: #0009; backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+  animation: fo-fade 0.2s ease-out;
+}
+.fo-sheet {
+  width: 100%; max-width: 560px; max-height: 100dvh; overflow-y: auto;
+  background: var(--bg2); border: 1px solid var(--line); border-bottom: 0; border-radius: 24px 24px 0 0;
+  padding: 16px 16px calc(18px + var(--safe-b));
+  animation: fo-up 0.25s ease-out;
+}
+@media (min-width: 600px) { .fo-overlay { align-items: center; } .fo-sheet { border-radius: 24px; border-bottom: 1px solid var(--line); } }
+.fo-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.fo-tier { font-weight: 700; font-size: 13px; color: var(--star); }
+.fo-title { font-size: 24px; text-align: center; margin: 10px 0 16px; }
+.fo-pair { display: grid; grid-template-columns: 1fr auto 1fr; gap: 10px; align-items: center; }
+.fo-pick {
+  display: flex; flex-direction: column; gap: 6px; align-items: center; text-align: center; min-width: 0;
+  background: var(--card); border: 2px solid var(--line); border-radius: 18px; padding: 10px; cursor: pointer;
+  transition: transform 0.12s, border-color 0.12s;
+}
+.fo-pick:hover, .fo-pick:focus-visible { border-color: var(--accent); outline: none; }
+.fo-pick:active { transform: scale(0.97); border-color: var(--accent); }
+.fo-pick .poster { width: 100%; max-width: 180px; }
+.fo-name { font-weight: 700; font-size: 15px; line-height: 1.2; }
+.fo-vs { font-family: "Bricolage Grotesque", sans-serif; font-weight: 800; color: var(--accent2); font-size: 16px; }
+.fo-tough { width: 100%; margin: 16px 0 6px; }
+@keyframes fo-fade { from { opacity: 0; } }
+@keyframes fo-up { from { transform: translateY(40px); } }
+@media (prefers-reduced-motion: reduce) { .fo-overlay, .fo-sheet { animation: none; } }

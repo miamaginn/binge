@@ -36,8 +36,11 @@ async function supabaseStore() {
     userId: r.user_id, showId: r.show_id, status: r.status, rating: r.rating == null ? null : +r.rating,
     seasons: r.seasons || {}, watchedWith: r.watched_with || [], note: r.note || "",
     score: r.score == null ? null : +r.score, updatedAt: Date.parse(r.updated_at),
+    tiebreak: r.tiebreak ?? null,
   });
-  const LOG_COLS = "user_id,show_id,status,rating,seasons,watched_with,note,score,updated_at";
+  // "*" so the face-off column is picked up once it exists (see supabase.sql)
+  const LOG_COLS = "*";
+  let tiebreakOk = true;
 
   async function loadMe() {
     const { data } = await sb.auth.getSession();
@@ -113,7 +116,17 @@ async function supabaseStore() {
     async saveShow(show) { ok(await sb.from("tv_shows").upsert({ id: show.id, data: show, updated_at: new Date().toISOString() })); },
     async cachedShows() { return ok(await sb.from("tv_shows").select("data").order("updated_at", { ascending: false }).limit(500)).map((r) => r.data); },
 
-    async myLogs() { return ok(await sb.from("tv_logs").select(LOG_COLS).eq("user_id", me.id)).map(logRow); },
+    async myLogs() {
+      const rows = ok(await sb.from("tv_logs").select(LOG_COLS).eq("user_id", me.id));
+      if (rows.length) tiebreakOk = "tiebreak" in rows[0];
+      return rows.map(logRow);
+    },
+    // false until the tiebreak column has been added to the database
+    tiebreakOk: () => tiebreakOk,
+    // [{ showId, tiebreak }] — your order among shows with the same score
+    async setTiebreaks(items) {
+      await Promise.all(items.map(async (i) => ok(await sb.from("tv_logs").update({ tiebreak: i.tiebreak }).eq("user_id", me.id).eq("show_id", i.showId))));
+    },
     async logsOf(userId) { return ok(await sb.from("tv_logs").select(LOG_COLS).eq("user_id", userId)).map(logRow); },
     // Everything this person may see (their own, friends', and logs they were tagged in).
     async visibleLogs() { return ok(await sb.from("tv_logs").select(LOG_COLS).order("updated_at", { ascending: false }).limit(2000)).map(logRow); },
@@ -243,6 +256,11 @@ function demoStore() {
     async saveShow(show) { db.shows[show.id] = show; save(); },
     async cachedShows() { return Object.values(db.shows).map(clone); },
     async myLogs() { return db.logs.filter((l) => l.userId === db.me).map(clone); },
+    tiebreakOk: () => true,
+    async setTiebreaks(items) {
+      for (const i of items) { const l = db.logs.find((x) => x.userId === db.me && x.showId === i.showId); if (l) l.tiebreak = i.tiebreak; }
+      save();
+    },
     async logsOf(userId) { return db.logs.filter((l) => l.userId === userId && canSee(l)).map(clone); },
     async visibleLogs() { return db.logs.filter(canSee).sort((a, b) => b.updatedAt - a.updatedAt).map(clone); },
     async saveLog(log) {
