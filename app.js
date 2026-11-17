@@ -551,7 +551,7 @@ function seasonChart(s, friendLogs, mine) {
   </section>`;
 }
 
-function rankedList(logs, { linkUser, recs } = {}) {
+function rankedList(logs, { linkUser, recs, editable } = {}) {
   const tabs = { ranked: (l) => l.score != null, watching: (l) => l.status === "watching", want: (l) => l.status === "want", dropped: (l) => l.status === "dropped" };
   const tab = tabs[S.rankTab] || (recs && S.rankTab === "recs") ? S.rankTab : "ranked";
   const list = tab === "recs" ? [] : logs.filter(tabs[tab]).sort((a, b) => tab === "ranked" ? rankSort(a, b) : b.updatedAt - a.updatedAt);
@@ -562,8 +562,9 @@ function rankedList(logs, { linkUser, recs } = {}) {
   <div class="seg wrap">
     ${tabList.map(([k, t, c]) => `<button class="${tab === k ? "on" : ""}" data-action="rank-tab" data-tab="${k}">${t} <small>${c}</small></button>`).join("")}
   </div>
-  ${tab === "recs" ? viewRecs() : list.length ? `<ol class="rank-list">${list.map((l, i) => { const s = S.shows.get(l.showId); if (!s) return ""; return `
-    <li><a class="card rank-item" href="#/show/${encodeURIComponent(s.id)}">
+  ${tab === "ranked" && editable && list.length > 1 ? `<p class="muted small drag-hint">Drag ⠿ to reorder your ranking.</p>` : ""}
+  ${tab === "recs" ? viewRecs() : list.length ? `<ol class="rank-list ${tab === "ranked" && editable ? "editable" : ""}">${list.map((l, i) => { const s = S.shows.get(l.showId); if (!s) return ""; return `
+    <li data-show="${esc(s.id)}">${tab === "ranked" && editable ? `<button class="drag-handle" aria-label="Move ${esc(s.name)} (rank ${i + 1}). Use arrow keys or drag." title="Drag to reorder">⠿</button>` : ""}<a class="card rank-item" href="#/show/${encodeURIComponent(s.id)}">
       ${tab === "ranked" ? `<span class="rank-num">${i + 1}</span>` : ""}
       ${poster(s, "sm")}
       <div class="grow">
@@ -585,7 +586,130 @@ function viewRank() {
     <div class="grow"><b>⚔️ ${tied} shows are tied</b><div class="muted small">Pick favorites head-to-head so your ranking is exact.</div></div>
     <button class="btn small primary" data-action="settle-ties">Settle ties</button>
   </div>` : ""}
-  ${rankedList([...S.myLogs.values()], { recs: S.recsOk })}`;
+  ${rankedList([...S.myLogs.values()], { recs: S.recsOk, editable: faceoffOk() })}`;
+}
+
+// ───────────────────────── Drag to reorder ─────────────────────────
+// Grab the ⠿ handle and drag. Dropping inside the same score just reorders;
+// dropping past a show with a different score asks to change the rating.
+let drag = null;
+
+document.addEventListener("pointerdown", (e) => {
+  const h = e.target.closest(".drag-handle");
+  if (!h || e.button > 0) return;
+  e.preventDefault();
+  const li = h.closest("li");
+  const items = [...li.parentElement.children];
+  drag = {
+    li, items, index: items.indexOf(li), target: items.indexOf(li),
+    rects: items.map((x) => x.getBoundingClientRect()), startY: e.clientY, lastY: e.clientY, startScroll: scrollY,
+  };
+  drag.gap = items.length > 1 ? Math.max(0, drag.rects[1].top - drag.rects[0].bottom) : 0;
+  S.dragging = true;
+  try { h.setPointerCapture(e.pointerId); } catch {}
+  li.classList.add("dragging");
+  document.body.classList.add("is-dragging");
+  (function tick() {
+    if (!drag) return;
+    const edge = 90, bottomEdge = innerHeight - (document.querySelector(".tabbar")?.offsetHeight || 70) - 50;
+    if (drag.lastY < edge) scrollBy(0, -Math.ceil((edge - drag.lastY) / 6));
+    else if (drag.lastY > bottomEdge) scrollBy(0, Math.ceil((drag.lastY - bottomEdge) / 6));
+    moveDrag();
+    requestAnimationFrame(tick);
+  })();
+});
+document.addEventListener("pointermove", (e) => { if (drag) { drag.lastY = e.clientY; moveDrag(); } });
+document.addEventListener("pointerup", () => endDrag(false));
+document.addEventListener("pointercancel", () => endDrag(true));
+
+function moveDrag() {
+  const d = drag;
+  const dy = d.lastY - d.startY + (scrollY - d.startScroll);
+  d.li.style.transform = `translateY(${dy}px)`;
+  const r0 = d.rects[d.index];
+  const center = r0.top + r0.height / 2 + dy;
+  let t = 0;
+  d.rects.forEach((r, j) => { if (j !== d.index && r.top + r.height / 2 < center) t++; });
+  d.target = t;
+  const shift = r0.height + d.gap;
+  d.items.forEach((it, j) => {
+    if (j === d.index) return;
+    it.style.transform = j > d.index && j <= t ? `translateY(${-shift}px)` : j < d.index && j >= t ? `translateY(${shift}px)` : "";
+  });
+}
+
+function endDrag(cancelled) {
+  if (!drag) return;
+  const d = drag;
+  drag = null;
+  d.items.forEach((it) => (it.style.transform = ""));
+  d.li.classList.remove("dragging");
+  document.body.classList.remove("is-dragging");
+  S.dragging = false;
+  S.renderPending = false;
+  const ids = d.items.map((it) => it.dataset.show);
+  if (cancelled || d.target === d.index) { render(); return; }
+  const [moved] = ids.splice(d.index, 1);
+  ids.splice(d.target, 0, moved);
+  reorder(ids, moved);
+}
+
+// keyboard: arrow keys on a handle move the show one place
+document.addEventListener("keydown", (e) => {
+  const h = e.target.closest?.(".drag-handle");
+  if (!h || !["ArrowUp", "ArrowDown"].includes(e.key)) return;
+  e.preventDefault();
+  const items = [...h.closest("ol").children].map((li) => li.dataset.show);
+  const id = h.closest("li").dataset.show, i = items.indexOf(id), j = i + (e.key === "ArrowUp" ? -1 : 1);
+  if (j < 0 || j >= items.length) return;
+  items.splice(i, 1);
+  items.splice(j, 0, id);
+  S.refocus = id;
+  reorder(items, id);
+});
+
+async function reorder(ids, showId) {
+  const me = S.myLogs.get(showId);
+  const i = ids.indexOf(showId);
+  const above = S.myLogs.get(ids[i - 1]), below = S.myLogs.get(ids[i + 1]);
+  let need = null;
+  if (above && me.score > above.score + 0.001) need = { other: above, dir: "below", newScore: Math.max(0.5, Math.floor(above.score * 10 + 1e-6) / 10) };
+  else if (below && me.score < below.score - 0.001) need = { other: below, dir: "above", newScore: Math.min(5, Math.ceil(below.score * 10 - 1e-6) / 10) };
+  if (need) { S.moveConfirm = { showId, ids, ...need }; render(); return; }
+  await applyOrder(ids, showId);
+  toast("Ranking updated");
+}
+
+// Save the on-screen order of the moved show's score group as tiebreaks.
+async function applyOrder(ids, showId) {
+  const score = S.myLogs.get(showId).score;
+  const group = ids.filter((id) => sameScore(S.myLogs.get(id)?.score, score));
+  const items = group.map((id, k) => ({ showId: id, tiebreak: group.length - k }));
+  for (const it of items) S.myLogs.get(it.showId).tiebreak = it.tiebreak;
+  render();
+  if (S.refocus) { document.querySelector(`li[data-show="${CSS.escape(S.refocus)}"] .drag-handle`)?.focus(); S.refocus = null; }
+  try { await S.store.setTiebreaks(items); } catch (e) { console.error(e); toast("Couldn't save the new order"); }
+}
+
+function viewMoveConfirm() {
+  const M = S.moveConfirm;
+  if (!M) return "";
+  const a = S.shows.get(M.showId), b = S.shows.get(M.other.showId);
+  const mine = S.myLogs.get(M.showId);
+  const fromSeasons = !mine.rating && Object.keys(mine.seasons || {}).length;
+  return `<div class="fo-overlay" role="dialog" aria-modal="true" aria-labelledby="mvTitle">
+    <div class="fo-sheet mv-sheet">
+      <h2 class="fo-title" id="mvTitle">Change ${esc(a.name)}'s rating?</h2>
+      <p class="center">You rated <b>${esc(a.name)}</b> ${stars(mine.score, { size: "sm" })} <b>${fmt(mine.score)}</b>,
+        but moved it ${M.dir} <b>${esc(b.name)}</b> (${fmt(M.other.score)}).</p>
+      <div class="mv-change">
+        <span>${stars(mine.score)} <b>${fmt(mine.score)}</b></span><span class="fo-vs">→</span><span>${stars(M.newScore)} <b>${fmt(M.newScore)}</b></span>
+      </div>
+      ${fromSeasons ? `<p class="muted small center">This sets an overall rating. Your season ratings stay the same.</p>` : ""}
+      <button class="btn primary big" data-action="mv-yes">Change to ★ ${fmt(M.newScore)}</button>
+      <button class="btn ghost fo-tough" data-action="mv-no">Cancel, keep it where it was</button>
+    </div>
+  </div>`;
 }
 
 // ───────────────────────── Face-offs ─────────────────────────
@@ -843,6 +967,7 @@ function route() {
 let lastRoute = "";
 function render() {
   if (!S.store) return;
+  if (S.dragging) { S.renderPending = true; return; }
   const r = route();
   document.body.classList.toggle("signed-out", !S.me);
   if (!S.me) { $main.innerHTML = viewAuth(); return; }
@@ -857,7 +982,7 @@ function render() {
   if (key !== lastRoute) { window.scrollTo(0, 0); lastRoute = key; }
   document.querySelectorAll(".tabbar a").forEach((a) => a.classList.toggle("on", a.dataset.tab === r.name || (r.name === "show" && a.dataset.tab === "discover") || (r.name === "u" && a.dataset.tab === "friends")));
   document.getElementById("meBtn").innerHTML = avatar(S.me);
-  const fo = viewFaceoff();
+  const fo = viewFaceoff() || viewMoveConfirm();
   const $ov = document.getElementById("overlay");
   if ($ov.dataset.html !== fo) { $ov.innerHTML = fo; $ov.dataset.html = fo; }
   document.body.classList.toggle("modal-open", !!fo);
@@ -940,6 +1065,21 @@ document.addEventListener("click", async (e) => {
       }
       case "fo-tough": { const F = S.faceoff; if (!F) return; F.lo = F.hi = F.mid; await stepFaceoff(); break; }
       case "fo-stop": S.faceoff = null; render(); break;
+      case "mv-no": S.moveConfirm = null; S.refocus = null; render(); break;
+      case "mv-yes": {
+        const M = S.moveConfirm;
+        if (!M) return;
+        el.disabled = true;
+        const log = { ...S.myLogs.get(M.showId), rating: M.newScore };
+        await S.store.saveLog(log);
+        Object.assign(S.myLogs.get(M.showId), { rating: M.newScore, score: M.newScore });
+        S.drafts.delete(M.showId);
+        S.moveConfirm = null;
+        await applyOrder(M.ids, M.showId);
+        toast(`${S.shows.get(M.showId)?.name} is now ★ ${fmt(M.newScore)}`);
+        refreshStats();
+        break;
+      }
       case "open-recs": S.rankTab = "recs"; location.hash = "#/rank"; break;
       case "rec-open": S.recPanel = { showId: id, to: [], msg: DEFAULT_REC_MSG }; render(); break;
       case "rec-cancel": S.recPanel = null; render(); break;

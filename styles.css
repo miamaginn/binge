@@ -326,3 +326,21 @@ body.modal-open { overflow: hidden; }
 @keyframes fo-fade { from { opacity: 0; } }
 @keyframes fo-up { from { transform: translateY(40px); } }
 @media (prefers-reduced-motion: reduce) { .fo-overlay, .fo-sheet { animation: none; } }
+
+/* ── drag to reorder ── */
+.drag-hint { margin: -4px 0 10px; }
+.rank-list.editable li { position: relative; }
+.rank-list.editable .rank-item { padding-right: 52px; }
+.rank-list li { transition: transform 0.18s ease; }
+.rank-list li.dragging { transition: none; z-index: 5; position: relative; }
+.rank-list li.dragging .rank-item { box-shadow: 0 14px 30px #000a; border-color: var(--accent); transform: scale(1.02); }
+.drag-handle {
+  position: absolute; right: 4px; top: 50%; transform: translateY(-50%); z-index: 2;
+  width: 44px; height: 56px; border: 0; background: transparent; color: var(--muted); font-size: 22px;
+  cursor: grab; touch-action: none; border-radius: 10px;
+}
+.drag-handle:focus-visible { outline: 2px solid var(--accent2); }
+body.is-dragging, body.is-dragging * { user-select: none; -webkit-user-select: none; cursor: grabbing !important; }
+.mv-change { display: flex; align-items: center; justify-content: center; gap: 12px; margin: 14px 0; font-size: 15px; }
+.mv-sheet .btn.big { margin-top: 8px; }
+@media (prefers-reduced-motion: reduce) { .rank-list li { transition: none; } }

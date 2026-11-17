@@ -2,7 +2,7 @@
 //  • App files: served from cache instantly, refreshed in the background.
 //  • Show posters: cached after the first view.
 //  • Everything else (Supabase, TVmaze searches): straight to the network.
-const VERSION = "binge-v5";
+const VERSION = "binge-v6";
 const SHELL = ["./", "index.html", "styles.css", "app.js", "store.js", "catalog.js", "config.js", "manifest.json", "icon.svg", "icon-192.png"];
 
 self.addEventListener("install", (e) => {
